@@ -21,7 +21,7 @@
 ## 📝 Project Description
 **CantonSuite+** is a modular, permissioned trading and compliance platform built on the Canton Network, designed for boutique institutions. It enables issuers to tokenize Real-World Assets (RWA), buyers to trade with built-in KYC, and regulators to audit securely via privacy-preserving dashboards. 
 
-By unifying issuer, buyer, compliance, and regulator workflows with an integrated DeFi layer for lending and borrowing, yield distribution and fractionalized trading, CantonSuite+ transforms tokenized finance from complex backend infrastructure into a practical, accessible, and fully compliant ecosystem.
+By unifying issuer, buyer, compliance, and regulator workflows with an integrated DeFi layer for lending and borrowing, yield distribution and fractionalized trading, and privacy preserving live audit for regulators. CantonSuite+ transforms tokenized finance from complex backend infrastructure into a practical, accessible, and fully compliant ecosystem.
 
 ---
 
