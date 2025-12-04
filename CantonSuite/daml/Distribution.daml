@@ -1,0 +1,103 @@
+module Distribution where
+
+import DA.Time
+import DA.Text (sha256)
+import DA.Foldable (forA_) -- Import needed for batch actions
+
+-- 1. Private Dividend (Real Identity for Compliance/User)
+template Dividend
+  with
+    issuer     : Party
+    owner      : Party
+    compliance : Party
+    assetId    : Text
+    label      : Text
+    cashAmount : Decimal
+    issuedAt   : Time
+  where
+    signatory issuer
+    observer owner, compliance
+
+    choice ClaimDividend : ()
+      controller owner
+      do
+        pure ()
+
+-- 2. Public Audit View (Hashed Identity for Regulator)
+template DividendRegulatorView
+  with
+    regulator    : Party
+    issuer       : Party
+    assetId      : Text
+    label        : Text
+    amount       : Decimal
+    receiverHash : Text -- "HOLDER-" <> sha256(owner)
+    distributedAt: Time
+  where
+    signatory issuer
+    observer regulator
+
+-- 3. Announcement (Trigger)
+template DividendAnnouncement
+  with
+    issuer       : Party
+    assetId      : Text
+    label        : Text
+    perUnitAmount: Decimal
+    distributionDate : Time
+    compliance   : Party
+    regulator    : Party
+  where
+    signatory issuer
+
+    nonconsuming choice DistributeToBuyer : ContractId Dividend
+      with
+        buyer    : Party
+        quantity : Decimal
+      controller issuer
+      do
+        let totalAmount = perUnitAmount * quantity
+        create Dividend with
+          issuer = issuer
+          owner = buyer
+          compliance = compliance
+          assetId = assetId
+          label = label
+          cashAmount = totalAmount
+          issuedAt = distributionDate
+
+    -- BATCH DISTRIBUTION (Creates both Private + Audit contracts)
+    choice DistributeToAll : ()
+      with
+        holders : [(Party, Decimal)]
+      controller issuer
+      do
+        forA_ holders $ \(buyer, quantity) -> do
+          let totalAmount = perUnitAmount * quantity
+          
+          -- A. Create Private Contract (Real Identity)
+          create Dividend with
+            issuer = issuer
+            owner = buyer
+            compliance = compliance
+            assetId = assetId
+            label = label
+            cashAmount = totalAmount
+            issuedAt = distributionDate
+
+          -- B. Create Audit View (Hashed Identity)
+          create DividendRegulatorView with
+            regulator = regulator
+            issuer = issuer
+            assetId = assetId
+            label = label
+            amount = totalAmount
+            receiverHash = "HOLDER-" <> sha256 (show buyer) -- Privacy Mask
+            distributedAt = distributionDate
+            
+        pure ()
+
+    choice CancelAnnouncement : ()
+      controller issuer
+      do
+        pure ()

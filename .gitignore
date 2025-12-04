@@ -1,0 +1,26 @@
+# --- Global OS Files ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Global IDE & Editor Settings ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*.iml
+*.njsproj
+*.sln
+
+# --- Global Safety Catch-alls ---
+# These ensure that if you accidentally drop these folders in the root, they are ignored
+node_modules/
+.daml/
+dist/
+build/
+*.dar
+*.log
+
+# --- Large Media Files ---
+# Uncomment below if your demo video is too large (>100MB) and blocks the push
+# demo.mp4

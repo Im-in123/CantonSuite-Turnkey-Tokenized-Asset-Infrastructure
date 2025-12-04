@@ -1,0 +1,317 @@
+module Tests.PrivacyTest where
+
+import Daml.Script
+import DA.List (head)
+import qualified DA.Text as T
+import qualified Scripts.MultiPartySetup as S
+import Trade
+import Lending
+import Portfolio
+import Regulator
+
+-- Helper function to check if text starts with prefix
+startsWith : Text -> Text -> Bool
+startsWith prefix text = 
+    let prefixLen = T.length prefix
+        textStart = T.take prefixLen text
+    in textStart == prefix
+
+-- Test 1: Regulator CANNOT see private trade details
+testRegulatorCannotSeePrivateTrades : Script ()
+testRegulatorCannotSeePrivateTrades = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, _) <- S.setup
+    
+    now <- getTime
+    
+    -- Alice proposes to buy from Bob
+    proposedTrade <- submit alice $ createCmd ProposedTrade with
+        buyer = alice
+        seller = bob
+        assetIssuer = issuer1
+        assetId = "TECH-B"
+        assetCid = tokenB
+        quantity = 10.0
+        pricePerUnit = 20.0
+        isPrimary = False
+        complianceParty = compliance
+        regulatorParty = regulator
+        createdAt = now
+    
+    -- Bob accepts
+    tradeAgreement <- submit bob $ exerciseCmd proposedTrade SellerAccept
+    
+    -- Compliance approves
+    approvedTrade <- submit compliance $ exerciseCmd tradeAgreement ApproveByCompliance
+    
+    -- TEST: Regulator should NOT be able to query ProposedTrade, TradeAgreement, or ApprovedTrade
+    regulatorProposed <- query @ProposedTrade regulator
+    regulatorAgreement <- query @TradeAgreement regulator
+    regulatorApproved <- query @ApprovedTrade regulator
+    
+    assertMsg "Regulator should NOT see ProposedTrade" (null regulatorProposed)
+    assertMsg "Regulator should NOT see TradeAgreement" (null regulatorAgreement)
+    assertMsg "Regulator should NOT see ApprovedTrade" (null regulatorApproved)
+    
+    -- Issuer finalizes (this creates RegulatorView)
+    submit issuer1 $ exerciseCmd approvedTrade Finalize
+    
+    -- TEST: Regulator CAN see RegulatorView (sanitized data)
+    regulatorViews <- query @RegulatorView regulator
+    assertMsg "Regulator should see RegulatorView" (not (null regulatorViews))
+    
+    -- TEST: Verify RegulatorView contains hashed identity, not real identity
+    let (_, view) = head regulatorViews
+    assertMsg "RegulatorView should have hashed buyer identity" 
+        (view.buyerPseudo /= show alice)
+    assertMsg "RegulatorView should contain 'BUYER-' prefix" 
+        (startsWith "BUYER-" view.buyerPseudo)
+    
+    return ()
+
+-- Test 2: Compliance CAN see real identities in trades
+testComplianceSeesRealIdentities : Script ()
+testComplianceSeesRealIdentities = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, _) <- S.setup
+    
+    now <- getTime
+    
+    -- Alice proposes trade
+    proposedTrade <- submit alice $ createCmd ProposedTrade with
+        buyer = alice
+        seller = bob
+        assetIssuer = issuer1
+        assetId = "TECH-B"
+        assetCid = tokenB
+        quantity = 10.0
+        pricePerUnit = 20.0
+        isPrimary = False
+        complianceParty = compliance
+        regulatorParty = regulator
+        createdAt = now
+    
+    -- Bob accepts
+    tradeAgreement <- submit bob $ exerciseCmd proposedTrade SellerAccept
+    
+    -- TEST: Compliance CAN see TradeAgreement with real identities
+    complianceAgreements <- query @TradeAgreement compliance
+    assertMsg "Compliance should see TradeAgreement" (not (null complianceAgreements))
+    
+    let (_, agreement) = head complianceAgreements
+    assertMsg "Compliance should see real buyer identity" (agreement.buyer == alice)
+    assertMsg "Compliance should see real seller identity" (agreement.seller == bob)
+    
+    return ()
+
+-- Test 3: Regulator CANNOT see private loan details
+testRegulatorCannotSeePrivateLoans : Script ()
+testRegulatorCannotSeePrivateLoans = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     _, _, _, _, _, _, _) <- S.setup
+    
+    now <- getTime
+    
+    -- Create lending pool
+    poolCid <- submit issuer1 $ createCmd LendingPool with
+        poolOperator = issuer1
+        assetId = "USD"
+        totalLiquidity = 10000.0
+        totalBorrowed = 0.0
+        totalShares = 10000.0
+        interestRate = 5.0
+        collateralRatio = 150.0
+        status = Open
+        observers = [publicParty]
+        regulatorParty = regulator
+    
+    -- Alice creates collateral
+    collateralCid <- submit alice $ createCmd Allocation with
+        owner = alice
+        assetId = "CollateralToken"
+        quantity = 150.0
+        issuer = issuer1
+    
+    -- Alice requests loan
+    loanRequest <- submit alice $ createCmd LoanRequest with
+        borrower = alice
+        poolOperator = issuer1
+        assetId = "USD"
+        requestedAmount = 1000.0
+        collateralAssetId = "CollateralToken"
+        collateralAmount = 150.0
+        collateralCid = collateralCid
+        durationDays = 30
+        createdAt = now
+        complianceParty = compliance
+        regulatorParty = regulator
+    
+    -- Issuer approves loan
+    (loanCid, regulatorViewCid) <- submit issuer1 $ exerciseCmd loanRequest ApproveLoan with
+        poolCid = poolCid
+    
+    -- TEST: Regulator should NOT be able to query Loan contract
+    regulatorLoans <- query @Loan regulator
+    assertMsg "Regulator should NOT see Loan contract" (null regulatorLoans)
+    
+    -- TEST: Regulator CAN see LendingRegulatorView
+    regulatorLendingViews <- query @LendingRegulatorView regulator
+    assertMsg "Regulator should see LendingRegulatorView" (not (null regulatorLendingViews))
+    
+    -- TEST: Verify LendingRegulatorView contains hashed loan ID, not real borrower
+    let (_, lendingView) = head regulatorLendingViews
+    assertMsg "LendingRegulatorView should have hashed loan ID" 
+        (lendingView.loanId /= show loanCid)
+    assertMsg "LendingRegulatorView should show ACTIVE status" 
+        (lendingView.status == "ACTIVE")
+    assertMsg "LendingRegulatorView should show LOAN_ORIGINATED event" 
+        (lendingView.eventType == "LOAN_ORIGINATED")
+    
+    return ()
+
+-- Test 4: Compliance CAN see loan requests with real identities
+testComplianceSeesRealLoanIdentities : Script ()
+testComplianceSeesRealLoanIdentities = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     _, _, _, _, _, _, _) <- S.setup
+    
+    now <- getTime
+
+    -- Create dummy collateral for the request
+    collateralCid <- submit alice $ createCmd Allocation with
+        owner = alice
+        assetId = "CollateralTokenX"
+        quantity = 150.0
+        issuer = issuer1
+    
+    -- Alice requests loan
+    loanRequest <- submit alice $ createCmd LoanRequest with
+        borrower = alice
+        poolOperator = issuer1
+        assetId = "USD"
+        requestedAmount = 1000.0
+        collateralAssetId = "CollateralTokenX"
+        collateralAmount = 150.0
+        collateralCid = collateralCid
+        durationDays = 30
+        createdAt = now
+        complianceParty = compliance
+        regulatorParty = regulator
+    
+    -- TEST: Compliance CAN see LoanRequest with real borrower identity
+    complianceLoanRequests <- query @LoanRequest compliance
+    assertMsg "Compliance should see LoanRequest" (not (null complianceLoanRequests))
+    
+    let (_, request) = head complianceLoanRequests
+    assertMsg "Compliance should see real borrower identity" (request.borrower == alice)
+    
+    return ()
+
+-- Test 5: Regulator sees loan lifecycle events (origination, repayment, liquidation)
+testRegulatorSeesLoanLifecycleEvents : Script ()
+testRegulatorSeesLoanLifecycleEvents = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     _, _, _, _, _, _, _) <- S.setup
+    
+    now <- getTime
+    
+    -- Setup pool
+    poolCid <- submit issuer1 $ createCmd LendingPool with
+        poolOperator = issuer1
+        assetId = "USD"
+        totalLiquidity = 10000.0
+        totalBorrowed = 0.0
+        totalShares = 10000.0
+        interestRate = 5.0
+        collateralRatio = 150.0
+        status = Open
+        observers = [publicParty]
+        regulatorParty = regulator
+    
+    collateralCid <- submit alice $ createCmd Allocation with
+        owner = alice
+        assetId = "CollateralToken"
+        quantity = 150.0
+        issuer = issuer1
+    
+    loanRequest <- submit alice $ createCmd LoanRequest with
+        borrower = alice
+        poolOperator = issuer1
+        assetId = "USD"
+        requestedAmount = 1000.0
+        collateralAssetId = "CollateralToken"
+        collateralAmount = 150.0
+        collateralCid = collateralCid
+        durationDays = 30
+        createdAt = now
+        complianceParty = compliance
+        regulatorParty = regulator
+    
+    -- Approve loan (this creates an Allocation for Alice with assetId = "USD")
+    (loanCid, _) <- submit issuer1 $ exerciseCmd loanRequest ApproveLoan with
+        poolCid = poolCid
+    
+    -- FIX: Query for Alice's USD allocation and update it instead of creating a new one
+    aliceAllocations <- query @Allocation alice
+    let usdAllocs = filter (\(_, a) -> a.assetId == "USD") aliceAllocations
+    
+    case usdAllocs of
+      (existingCid, existing) :: rest -> do
+        -- Archive existing and create updated one with enough for repayment
+        submit alice $ archiveCmd existingCid
+        repaymentCid <- submit alice $ createCmd Allocation with
+            owner = alice
+            assetId = "USD"
+            quantity = existing.quantity + 50.0  -- Add 50 to cover interest
+            issuer = issuer1
+        
+        -- Fetch updated pool
+        activePools <- query @LendingPool issuer1
+        let (newPoolCid, _) = head activePools
+        
+        -- Repay loan (creates second regulator view: LOAN_REPAID)
+        (_, _, _) <- submit alice $ exerciseCmd loanCid RepayLoan with
+            repaymentAllocCid = repaymentCid
+            poolCid = newPoolCid
+        
+        -- TEST: Regulator should see TWO LendingRegulatorView contracts (origination + repayment)
+        regulatorLendingViews <- query @LendingRegulatorView regulator
+        let numViews = length regulatorLendingViews
+        assertMsg "Regulator should see 2 LendingRegulatorView events" 
+            (numViews == 2)
+        
+        -- TEST: Verify event types
+        let eventTypes = map (\(_, v) -> v.eventType) regulatorLendingViews
+        assertMsg "Regulator should see LOAN_ORIGINATED event" 
+            ("LOAN_ORIGINATED" `elem` eventTypes)
+        assertMsg "Regulator should see LOAN_REPAID event" 
+            ("LOAN_REPAID" `elem` eventTypes)
+        
+        return ()
+      [] -> do
+        abort "Expected Alice to have USD allocation after loan approval"
+
+-- Test 6: Alice and Bob can see their own trades but not each other's
+testUserPrivacyBetweenParties : Script ()
+testUserPrivacyBetweenParties = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, _) <- S.setup
+    
+    -- Alice can see her allocations
+    aliceAllocations <- query @Allocation alice
+    assertMsg "Alice should see her allocations" (not (null aliceAllocations))
+    
+    -- Bob can see his allocations
+    bobAllocations <- query @Allocation bob
+    assertMsg "Bob should see his allocations" (not (null bobAllocations))
+    
+    -- TEST: Alice cannot see Bob's allocations (they're not observers)
+    let aliceSeenOwners = map (\(_, a) -> a.owner) aliceAllocations
+    assertMsg "Alice should only see her own allocations" 
+        (all (== alice) aliceSeenOwners)
+    
+    let bobSeenOwners = map (\(_, a) -> a.owner) bobAllocations
+    assertMsg "Bob should only see his own allocations" 
+        (all (== bob) bobSeenOwners)
+    
+    return ()

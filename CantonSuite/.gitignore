@@ -1,0 +1,13 @@
+# --- DAML Build Artifacts ---
+.daml/
+dist/
+*.dar
+
+# --- Logs ---
+*.log
+canton.log
+logs/
+
+# --- Temporary/Cache ---
+.bsp/
+target/

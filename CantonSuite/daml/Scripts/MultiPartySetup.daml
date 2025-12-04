@@ -1,0 +1,140 @@
+module Scripts.MultiPartySetup where
+
+import Daml.Script
+import Users (User(..))
+import Assets  
+import KYC (KYC(..))
+import Types (Role(..), KYCStatus(..))
+import Trade (ProposedTrade(..), TradeAgreement(..), SellerAccept(..))
+import Portfolio (Allocation(..))
+import DA.Time()
+import Compliance()
+import Regulator()
+
+setup : Script
+    ( Party, Party, Party, Party, Party, Party, Party
+    , ContractId Asset, ContractId Asset, ContractId Asset, ContractId Asset
+    , ContractId ProposedTrade, ContractId TradeAgreement
+    , ContractId Asset )
+setup = script do
+    -- 1. Allocate Parties
+    issuer1 <- allocateParty "Issuer1"
+    issuer2 <- allocateParty "Issuer2"
+    alice  <- allocateParty "Alice"
+    bob    <- allocateParty "Bob"
+    compliance <- allocateParty "Compliance"
+    regulator  <- allocateParty "Regulator"
+    publicParty <- allocateParty "Public" 
+
+    -- 2. Create Users
+    let createUser party userName role = submit party $ createCmd Users.User with
+                                        partyId = party
+                                        name = userName
+                                        email = userName <> "@example.com"
+                                        role = role
+    _ <- createUser issuer1 "Issuer1" Issuer
+    _ <- createUser issuer2 "Issuer2" Issuer
+    _ <- createUser alice  "Alice"  Buyer
+    _ <- createUser bob    "Bob"    Buyer
+    _ <- createUser compliance "Compliance" Compliance
+    _ <- createUser regulator  "Regulator" Regulator
+
+    -- 3. Issuer1 Issues Assets (Tech Company Tokens)
+    tokenA <- submit issuer1 $ createCmd Asset with
+        issuer = issuer1
+        compliance = compliance
+        assetId = "TECH-A"
+        name = "TechCorp Class A Shares"
+        assetType = "Equity"
+        totalSupply = 1000.0
+        fractionalized = True
+        pricePerUnit = 10.0
+        availableSupply = 1000.0
+        observers = [publicParty, regulator] 
+
+    tokenB <- submit issuer1 $ createCmd Asset with
+        issuer = issuer1
+        compliance = compliance
+        assetId = "TECH-B"
+        name = "TechCorp Class B Shares"
+        assetType = "Equity"
+        totalSupply = 500.0
+        fractionalized = True
+        pricePerUnit = 20.0
+        availableSupply = 500.0
+        observers = [publicParty, regulator]
+
+    -- 4. Issuer2 Issues Assets (Real Estate Tokens)
+    tokenC <- submit issuer2 $ createCmd Asset with
+        issuer = issuer2
+        compliance = compliance
+        assetId = "RE-PROP1"
+        name = "Downtown Office Building"
+        assetType = "Real Estate"
+        totalSupply = 10000.0
+        fractionalized = True
+        pricePerUnit = 100.0
+        availableSupply = 10000.0
+        observers = [publicParty, regulator]
+
+    tokenD <- submit issuer2 $ createCmd Asset with
+        issuer = issuer2
+        compliance = compliance
+        assetId = "RE-PROP2"
+        name = "Shopping Mall Portfolio"
+        assetType = "Real Estate"
+        totalSupply = 5000.0
+        fractionalized = True
+        pricePerUnit = 200.0
+        availableSupply = 5000.0
+        observers = [publicParty, regulator]
+
+    -- 5. Initial KYC for buyers
+    let createKYC buyer = submit buyer $ createCmd KYC with
+                             buyer = buyer
+                             compliance = compliance
+                             status = KPending
+    _ <- createKYC alice
+    _ <- createKYC bob
+
+    -- 6. Portfolio allocations from both issuers
+    let allocatePortfolio owner assetIdText qty issuerParty = 
+            submit owner $ createCmd Allocation with
+                owner = owner
+                assetId = assetIdText
+                quantity = qty
+                issuer = issuerParty
+    
+    -- Alice gets tokens from Issuer1
+    _ <- allocatePortfolio alice "TECH-A" 100.0 issuer1
+    
+    -- Bob gets tokens from both issuers
+    _ <- allocatePortfolio bob "TECH-B" 50.0 issuer1
+    _ <- allocatePortfolio bob "RE-PROP1" 200.0 issuer2
+
+    -- 7. Asset lifecycle operations (Issuer1 only for demo)
+    tokenA1 <- submit issuer1 $ exerciseCmd tokenA ToggleFractionalized
+    tokenA2 <- submit issuer1 $ exerciseCmd tokenA1 UpdatePrice with newPrice = 12.0
+    tokenA3 <- submit issuer1 $ exerciseCmd tokenA2 Mint with amount = 500.0
+    tokenAFinal <- submit issuer1 $ exerciseCmd tokenA3 Burn with amount = 200.0
+
+    -- 8. Pre-create a proposed secondary trade (Issuer1's token)
+    now <- getTime
+    proposedTrade <- submit alice $ createCmd ProposedTrade with
+        buyer = alice
+        seller = bob
+        assetIssuer = issuer1
+        assetId = "TECH-B"
+        assetCid = tokenB
+        quantity = 25.0
+        pricePerUnit = 20.0
+        isPrimary = False
+        complianceParty = compliance
+        regulatorParty = regulator
+        createdAt = now
+
+    tradeAgreement <- submit bob $ exerciseCmd proposedTrade SellerAccept
+
+    return (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+            tokenA, tokenB, tokenC, tokenD, 
+            proposedTrade, tradeAgreement, tokenAFinal)

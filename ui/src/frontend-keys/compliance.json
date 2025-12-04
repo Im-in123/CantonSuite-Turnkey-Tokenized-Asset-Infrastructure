@@ -1,0 +1,7 @@
+{
+  "party": "Compliance",
+  "participant": "participant-compliance",
+  "publicKeyBase64": "MCowBQYDK2VwAyEAuXV/tm02TXg/Ms7kh20iPNTb/DYSBINLPWHR+CXoXAQ=",
+  "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEID//sYOyP7jCXzVhYP5RrbUONd/+2yWTh7rbAb2662AV\n-----END PRIVATE KEY-----\n",
+  "warning": "This file contains a private key. Use only for local development; do NOT store in production or commit to VCS."
+}

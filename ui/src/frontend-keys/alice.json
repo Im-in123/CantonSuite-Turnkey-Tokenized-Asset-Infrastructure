@@ -1,0 +1,7 @@
+{
+  "party": "Alice",
+  "participant": "participant-alice",
+  "publicKeyBase64": "MCowBQYDK2VwAyEAPaVkzXf5fifXd5B7inNSmtLzQSr/Vrhm+2Uzk1NVFTo=",
+  "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICDy7f2MXcSsVvD/k+1zS4RoXjDp6jP8Z4gySfhSNmzG\n-----END PRIVATE KEY-----\n",
+  "warning": "This file contains a private key. Use only for local development; do NOT store in production or commit to VCS."
+}

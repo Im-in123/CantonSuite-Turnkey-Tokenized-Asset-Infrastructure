@@ -1,0 +1,15 @@
+module Portfolio where
+
+template Allocation
+  with
+    owner   : Party
+    assetId : Text
+    quantity: Decimal
+    issuer  : Party
+  where
+    signatory owner
+    observer issuer
+
+    -- NEW: Add a key so we can look this up easily during Redemption
+    key (owner, assetId) : (Party, Text)
+    maintainer key._1

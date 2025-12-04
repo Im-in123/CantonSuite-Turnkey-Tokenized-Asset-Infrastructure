@@ -1,0 +1,49 @@
+module Redemption where
+
+import Portfolio
+import Assets
+
+template RedemptionRequest
+  with
+    buyer      : Party
+    issuer     : Party
+    assetId    : Text
+    quantity   : Decimal
+    reason     : Text
+  where
+    signatory buyer
+    observer issuer
+
+    choice ApproveRedemption : ()
+      with
+        assetCid : ContractId Asset -- Issuer provides the Asset contract to burn from
+      controller issuer
+      do
+        -- 1. Look up the Buyer's allocation using the key
+        (allocCid, alloc) <- fetchByKey @Allocation (buyer, assetId)
+        
+        -- 2. Check funds
+        assertMsg "Insufficient funds for redemption" (alloc.quantity >= quantity)
+        
+        -- 3. Update Buyer's Portfolio (Split or Archive)
+        archive allocCid
+        if alloc.quantity > quantity then do
+           _ <- create Allocation with
+              owner = buyer
+              assetId = assetId
+              quantity = alloc.quantity - quantity
+              issuer = issuer
+           pure ()
+        else 
+           pure ()
+
+        -- 4. Burn the tokens from the Global Supply
+        _ <- exercise assetCid Burn with amount = quantity
+        
+        -- (Off-ledger: Issuer sends wire transfer to Buyer)
+        pure ()
+
+    choice CancelRedemption : ()
+      controller buyer
+      do
+        archive self

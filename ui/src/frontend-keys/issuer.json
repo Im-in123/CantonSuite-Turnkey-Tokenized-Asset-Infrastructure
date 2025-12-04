@@ -1,0 +1,7 @@
+{
+  "party": "Issuer",
+  "participant": "participant-issuer",
+  "publicKeyBase64": "MCowBQYDK2VwAyEAdtvFa1g1RFxEYIW/Fq4WCRApNCrlDBpebKIJT+bxFPk=",
+  "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIE3JquHFeGIx7FyC7R6ctCv8oWRMGU6YfaS18Os9fFV+\n-----END PRIVATE KEY-----\n",
+  "warning": "This file contains a private key. Use only for local development; do NOT store in production or commit to VCS."
+}

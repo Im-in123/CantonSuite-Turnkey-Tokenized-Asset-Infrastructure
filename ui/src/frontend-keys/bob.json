@@ -1,0 +1,7 @@
+{
+  "party": "Bob",
+  "participant": "participant-bob",
+  "publicKeyBase64": "MCowBQYDK2VwAyEApzLwE6qMFFWcK10mfoJtoEXN8W/6Gp7gWWefS+l1gUc=",
+  "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIHBxW6kFUx56ViLlHcEyyIcTlV4Ibd7wjcQSXlrdwCo8\n-----END PRIVATE KEY-----\n",
+  "warning": "This file contains a private key. Use only for local development; do NOT store in production or commit to VCS."
+}

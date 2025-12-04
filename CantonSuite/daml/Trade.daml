@@ -1,0 +1,202 @@
+module Trade where
+
+import DA.Time
+import DA.Text (sha256)
+import Assets
+import Portfolio
+import Regulator
+import Compliance
+import Types
+
+tradeValueThreshold : Decimal
+tradeValueThreshold = 10000.0
+
+-- Privacy helper: Hash party identity
+partyToRedactedText : Party -> Text
+partyToRedactedText p = "BUYER-" <> sha256 (show p)
+
+-------------------------------
+-- ProposedTrade Template
+-------------------------------
+template ProposedTrade
+  with
+    buyer          : Party
+    seller         : Party
+    assetIssuer    : Party
+    assetId        : Text
+    assetCid       : ContractId Asset
+    quantity       : Decimal
+    pricePerUnit   : Decimal
+    isPrimary      : Bool
+    complianceParty: Party
+    regulatorParty : Party
+    createdAt      : Time
+  where
+    signatory buyer
+    observer seller, complianceParty  -- FIXED: Removed regulatorParty
+
+    choice SellerAccept : ContractId TradeAgreement
+      controller seller
+      do
+        assertMsg "Quantity must be positive" (quantity > 0.0)
+        now <- getTime
+        let expiryTime = addRelTime now (hours 24)  -- 24 hour expiry
+        
+        create TradeAgreement with
+          buyer = buyer
+          seller = seller
+          assetIssuer = assetIssuer
+          assetId = assetId
+          assetCid = assetCid
+          quantity = quantity
+          pricePerUnit = pricePerUnit
+          isPrimary = isPrimary
+          complianceParty = complianceParty
+          regulatorParty = regulatorParty
+          createdAt = createdAt
+          expiresAt = expiryTime
+
+    choice CancelProposal : ()
+      controller buyer
+      do
+        pure ()
+
+-------------------------------
+-- TradeAgreement Template
+-------------------------------
+template TradeAgreement
+  with
+    buyer          : Party
+    seller         : Party
+    assetIssuer    : Party
+    assetId        : Text
+    assetCid       : ContractId Asset
+    quantity       : Decimal
+    pricePerUnit   : Decimal
+    isPrimary      : Bool
+    complianceParty: Party
+    regulatorParty : Party
+    createdAt      : Time
+    expiresAt      : Time
+  where
+    signatory buyer, seller
+    observer complianceParty, assetIssuer  -- FIXED: Removed regulatorParty
+
+    choice ApproveByCompliance : ContractId ApprovedTrade
+      controller complianceParty
+      do
+        now <- getTime
+        _ <- create Compliance.ComplianceReview with
+              compliance = complianceParty
+              reason = "Approval for trade agreement"
+              createdAt = now
+              buyer = buyer
+              seller = seller
+              assetId = assetId
+              amount = quantity
+        
+        -- Create an approved trade that issuer can finalize
+        create ApprovedTrade with
+          buyer = buyer
+          seller = seller
+          assetIssuer = assetIssuer
+          assetId = assetId
+          assetCid = assetCid
+          quantity = quantity
+          pricePerUnit = pricePerUnit
+          isPrimary = isPrimary
+          complianceParty = complianceParty
+          regulatorParty = regulatorParty
+          createdAt = createdAt
+          expiresAt = expiresAt
+          approvedAt = now
+
+    choice CancelTrade : ()
+      controller buyer, seller
+      do
+        pure ()
+
+-------------------------------
+-- ApprovedTrade Template
+-------------------------------
+template ApprovedTrade
+  with
+    buyer          : Party
+    seller         : Party
+    assetIssuer    : Party
+    assetId        : Text
+    assetCid       : ContractId Asset
+    quantity       : Decimal
+    pricePerUnit   : Decimal
+    isPrimary      : Bool
+    complianceParty: Party
+    regulatorParty : Party
+    createdAt      : Time
+    expiresAt      : Time
+    approvedAt     : Time
+  where
+    signatory buyer, seller, complianceParty
+    observer assetIssuer  -- FIXED: Removed regulatorParty (they get RegulatorView instead)
+
+    -------------------------------
+    -- Finalize Choice
+    -------------------------------
+    choice Finalize : ()
+      controller assetIssuer
+      do
+        -- SECURITY FIX: Validate controller is actual issuer
+        asset <- fetch assetCid
+        assertMsg "Only asset issuer can finalize" (assetIssuer == asset.issuer)
+        
+        -- Check expiration
+        now <- getTime
+        assertMsg "Trade has expired" (now <= expiresAt)
+        
+        assertMsg "Quantity must be positive" (quantity > 0.0)
+        
+        -- Compliance already approved, so no threshold check needed
+        assertMsg "Seller must be asset issuer for primary"
+          (not isPrimary || seller == asset.issuer)
+        assertMsg "Not enough supply"
+          (not isPrimary || asset.availableSupply >= quantity)
+
+        if isPrimary then do
+          -- DecreaseSupply for primary market trades
+          _ <- exercise assetCid DecreaseSupply with
+                delta = quantity
+          pure ()
+        else
+          pure ()
+
+        -- Portfolio allocation - Check if allocation already exists
+        optExisting <- lookupByKey @Allocation (buyer, assetId)
+        case optExisting of
+          None -> do
+            -- Create new allocation
+            _ <- create Portfolio.Allocation with
+                  owner = buyer
+                  assetId = assetId
+                  quantity = quantity
+                  issuer = assetIssuer
+            pure ()
+          Some existingCid -> do
+            -- Update existing allocation
+            existing <- fetch existingCid
+            archive existingCid
+            _ <- create Portfolio.Allocation with
+                  owner = buyer
+                  assetId = assetId
+                  quantity = existing.quantity + quantity
+                  issuer = assetIssuer
+            pure ()
+
+        -- PRIVACY FIX: Regulator sees ONLY sanitized view (hashed identities)
+        _ <- create Regulator.RegulatorView with
+              regulator = regulatorParty
+              assetId = assetId
+              quantity = quantity
+              buyerPseudo = partyToRedactedText buyer  -- Hashed identity
+              issuer = assetIssuer
+              executedAt = now
+
+        pure ()

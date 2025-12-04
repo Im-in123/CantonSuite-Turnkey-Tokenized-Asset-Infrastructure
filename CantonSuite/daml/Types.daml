@@ -1,0 +1,10 @@
+module Types where
+
+data Role = Issuer | Buyer | Compliance | Regulator
+  deriving (Eq, Show, Ord)
+
+data KYCStatus = KPending | KApproved | KRejected
+  deriving (Eq, Show, Ord)
+
+data TradeStatus = TRequested | TExecuted | TRejected | TUnderReview
+  deriving (Eq, Show, Ord)

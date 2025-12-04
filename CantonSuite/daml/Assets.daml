@@ -1,0 +1,108 @@
+module Assets where
+
+template DraftAsset
+  with
+    draftIssuer    : Party
+    compliance     : Party
+    assetId        : Text
+    name           : Text
+    assetType      : Text
+    totalSupply    : Decimal
+    fractionalized : Bool
+    pricePerUnit   : Decimal
+    availableSupply: Decimal
+    observers      : [Party]
+  where
+    signatory draftIssuer
+    observer compliance
+    
+    ensure
+      assetId /= "" &&
+      name /= "" &&
+      totalSupply > 0.0 &&
+      pricePerUnit > 0.0 &&
+      availableSupply <= totalSupply &&
+      availableSupply >= 0.0
+
+    -- UPDATED CHOICE: Accepts new observers to add upon finalization
+    choice FinalizeIssuance : ContractId Asset
+      with
+        additionalObservers : [Party] -- New Argument
+      controller compliance
+      do
+        create Asset with
+          issuer         = draftIssuer
+          compliance     = compliance
+          assetId        = assetId
+          name           = name
+          assetType      = assetType
+          totalSupply    = totalSupply
+          fractionalized = fractionalized
+          pricePerUnit   = pricePerUnit
+          availableSupply= availableSupply
+          -- Combine original observers (Regulator) + New Ones (Public)
+          observers      = observers ++ additionalObservers 
+
+template Asset
+  with
+    issuer         : Party
+    compliance     : Party
+    assetId        : Text
+    name           : Text
+    assetType      : Text
+    totalSupply    : Decimal
+    fractionalized : Bool
+    pricePerUnit   : Decimal
+    availableSupply: Decimal
+    observers      : [Party]
+  where
+    signatory issuer
+    observer compliance, observers 
+    
+    ensure
+      assetId /= "" &&
+      name /= "" &&
+      totalSupply > 0.0 &&
+      pricePerUnit > 0.0 &&
+      availableSupply <= totalSupply &&
+      availableSupply >= 0.0
+
+    choice DecreaseSupply : ContractId Asset
+      with
+        delta : Decimal
+      controller issuer
+      do
+        assertMsg "delta must be positive" (delta > 0.0)
+        assertMsg "not enough supply" (availableSupply >= delta)
+        create this with availableSupply = availableSupply - delta
+
+    choice UpdatePrice : ContractId Asset
+      with newPrice : Decimal
+      controller issuer
+      do
+        assertMsg "Price must be positive" (newPrice > 0.0)
+        create this with pricePerUnit = newPrice
+
+    choice ToggleFractionalized : ContractId Asset
+      controller issuer
+      do
+        create this with fractionalized = not fractionalized
+
+    choice Mint : ContractId Asset
+      with amount : Decimal
+      controller issuer
+      do
+        assertMsg "Mint must be positive" (amount > 0.0)
+        create this with
+          totalSupply = totalSupply + amount
+          availableSupply = availableSupply + amount
+
+    choice Burn : ContractId Asset
+      with amount : Decimal
+      controller issuer
+      do
+        assertMsg "Burn must be positive" (amount > 0.0)
+        assertMsg "Cannot burn more than availableSupply" (amount <= availableSupply)
+        create this with
+          totalSupply = totalSupply - amount
+          availableSupply = availableSupply - amount

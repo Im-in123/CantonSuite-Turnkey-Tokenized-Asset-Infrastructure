@@ -1,0 +1,11 @@
+module Users where
+import Types
+
+template User
+  with
+    partyId : Party
+    name    : Text
+    email   : Text
+    role    : Role
+  where
+    signatory partyId

@@ -1,0 +1,27 @@
+module KYC where
+
+import Types
+import DA.Time()
+
+template KYC
+  with
+    buyer      : Party
+    compliance : Party
+    status     : KYCStatus
+  where
+    signatory buyer
+    observer compliance
+
+    choice Approve : ContractId KYC
+      controller compliance
+      do
+        newCid <- create this with status = KApproved
+    
+        pure newCid
+
+    choice Reject : ContractId KYC
+      controller compliance
+      do
+        newCid <- create this with status = KRejected
+        -- archive self (Removed)
+        pure newCid

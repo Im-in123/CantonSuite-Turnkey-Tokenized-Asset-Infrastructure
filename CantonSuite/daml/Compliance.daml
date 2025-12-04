@@ -1,0 +1,15 @@
+module Compliance where
+
+import DA.Time
+
+template ComplianceReview
+  with
+    compliance : Party
+    reason     : Text
+    createdAt  : Time
+    buyer      : Party
+    seller     : Party
+    assetId    : Text
+    amount     : Decimal
+  where
+    signatory compliance

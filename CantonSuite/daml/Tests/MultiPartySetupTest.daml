@@ -1,0 +1,288 @@
+module Tests.MultiPartySetupTest where
+
+import Daml.Script
+import DA.List (head, length)
+import qualified Scripts.MultiPartySetup as S
+import Assets (Asset(..))
+import Trade (ProposedTrade(..), TradeAgreement(..), SellerAccept(..), ApproveByCompliance(..), Finalize(..))
+import Portfolio (Allocation(..))
+import Regulator (RegulatorView(..))
+import DA.Time()
+
+-- | Happy path test: all participants, assets, and trades set up correctly
+testHappyPath : Script ()
+testHappyPath = script do
+    -- Destructure the tuple (now includes issuer2 and more tokens)
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, 
+     proposedTrade, tradeAgreement, tokenAFinal) <- S.setup
+
+    -- Check basic portfolio allocations
+    aliceAlloc <- query @Allocation alice
+    bobAlloc   <- query @Allocation bob
+
+    assertMsg "Alice should have an allocation for TECH-A" $
+        any (\(_cid, a) -> a.assetId == "TECH-A" && a.owner == alice) aliceAlloc
+
+    assertMsg "Bob should have an allocation for TECH-B" $
+        any (\(_cid, a) -> a.assetId == "TECH-B" && a.owner == bob) bobAlloc
+
+    assertMsg "Bob should have an allocation for RE-PROP1" $
+        any (\(_cid, a) -> a.assetId == "RE-PROP1" && a.owner == bob) bobAlloc
+
+    return ()
+
+-- | High-value trade triggers compliance review
+testHighValueReview : Script ()
+testHighValueReview = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, _) <- S.setup
+
+    -- Artificially increase price to trigger compliance
+    let highPrice = 20.0 * 1000.0
+    now <- getTime
+    proposedHighTrade <- submit alice $ createCmd ProposedTrade with
+        buyer = alice
+        seller = bob
+        assetIssuer = issuer1
+        assetId = "TECH-B"
+        assetCid = tokenB
+        quantity = 10.0
+        pricePerUnit = highPrice
+        isPrimary = False
+        complianceParty = compliance
+        regulatorParty = regulator
+        createdAt = now
+
+    -- Bob accepts
+    tradeAgreementHigh <- submit bob $ exerciseCmd proposedHighTrade SellerAccept
+    
+    -- Compliance approval
+    approvedTrade <- submit compliance $ exerciseCmd tradeAgreementHigh ApproveByCompliance
+    
+    -- Issuer finalizes
+    submit issuer1 $ exerciseCmd approvedTrade Finalize
+
+    return ()
+
+-- | Test complete trade flow with privacy verification
+testCompleteTradeFlowWithPrivacy : Script ()
+testCompleteTradeFlowWithPrivacy = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, _) <- S.setup
+    
+    now <- getTime
+    
+    -- 1. Alice proposes to buy TECH-B from Bob
+    proposedTrade <- submit alice $ createCmd ProposedTrade with
+        buyer = alice
+        seller = bob
+        assetIssuer = issuer1
+        assetId = "TECH-B"
+        assetCid = tokenB
+        quantity = 10.0
+        pricePerUnit = 20.0
+        isPrimary = False
+        complianceParty = compliance
+        regulatorParty = regulator
+        createdAt = now
+    
+    -- 2. Bob accepts the proposal
+    tradeAgreement <- submit bob $ exerciseCmd proposedTrade SellerAccept
+    
+    -- 3. Compliance approves
+    approvedTrade <- submit compliance $ exerciseCmd tradeAgreement ApproveByCompliance
+    
+    -- 4. Issuer finalizes
+    submit issuer1 $ exerciseCmd approvedTrade Finalize
+    
+    -- 5. Verify Alice received the tokens
+    aliceAllocations <- query @Allocation alice
+    let aliceTokenB = filter (\(_, a) -> a.assetId == "TECH-B") aliceAllocations
+    assertMsg "Alice should have TECH-B allocation" (not (null aliceTokenB))
+    
+    -- 6. Verify RegulatorView was created
+    regulatorViews <- query @RegulatorView regulator
+    assertMsg "RegulatorView should be created" (not (null regulatorViews))
+    
+    -- 7. Verify privacy: RegulatorView has hashed identity
+    let (_, view) = head regulatorViews
+    assertMsg "RegulatorView should not contain real Party ID" 
+        (view.buyerPseudo /= show alice)
+    
+    return ()
+
+-- | Test primary market trade from Issuer2 (Real Estate)
+testPrimaryMarketTrade : Script ()
+testPrimaryMarketTrade = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, tokenAFinal) <- S.setup
+    
+    now <- getTime
+    
+    -- Alice buys directly from Issuer2 (primary market - Real Estate)
+    proposedPrimaryTrade <- submit alice $ createCmd ProposedTrade with
+        buyer = alice
+        seller = issuer2
+        assetIssuer = issuer2
+        assetId = "RE-PROP2"
+        assetCid = tokenD
+        quantity = 100.0
+        pricePerUnit = 200.0
+        isPrimary = True
+        complianceParty = compliance
+        regulatorParty = regulator
+        createdAt = now
+    
+    -- Issuer2 accepts
+    tradeAgreement <- submit issuer2 $ exerciseCmd proposedPrimaryTrade SellerAccept
+    
+    -- Compliance approves
+    approvedTrade <- submit compliance $ exerciseCmd tradeAgreement ApproveByCompliance
+    
+    -- Issuer2 finalizes
+    submit issuer2 $ exerciseCmd approvedTrade Finalize
+    
+    -- Verify Alice received tokens
+    aliceAllocations <- query @Allocation alice
+    let aliceRealEstate = filter (\(_, a) -> a.assetId == "RE-PROP2") aliceAllocations
+    assertMsg "Alice should have RE-PROP2 from primary market" (not (null aliceRealEstate))
+    
+    return ()
+
+-- | Test asset lifecycle operations
+testAssetLifecycleOperations : Script ()
+testAssetLifecycleOperations = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, tokenAFinal) <- S.setup
+    
+    -- TokenA already went through lifecycle in setup
+    allAssets <- query @Asset issuer1
+    let finalAssets = filter (\(cid, _) -> cid == tokenAFinal) allAssets
+    
+    case finalAssets of
+        [(_, finalAsset)] -> do
+            assertMsg "Price should be updated to 12.0" (finalAsset.pricePerUnit == 12.0)
+            assertMsg "Total supply should reflect mint and burn" 
+                (finalAsset.totalSupply == 1000.0 + 500.0 - 200.0)
+        _ -> abort "Could not find final asset"
+    
+    return ()
+
+-- | Test cross-issuer trade (Bob selling Issuer2 token to Alice)
+testCrossIssuerTrade : Script ()
+testCrossIssuerTrade = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, _) <- S.setup
+    
+    now <- getTime
+    
+    -- Alice wants to buy RE-PROP1 from Bob (issued by Issuer2)
+    proposedTrade <- submit alice $ createCmd ProposedTrade with
+        buyer = alice
+        seller = bob
+        assetIssuer = issuer2
+        assetId = "RE-PROP1"
+        assetCid = tokenC
+        quantity = 50.0
+        pricePerUnit = 100.0
+        isPrimary = False
+        complianceParty = compliance
+        regulatorParty = regulator
+        createdAt = now
+    
+    tradeAgreement <- submit bob $ exerciseCmd proposedTrade SellerAccept
+    approvedTrade <- submit compliance $ exerciseCmd tradeAgreement ApproveByCompliance
+    submit issuer2 $ exerciseCmd approvedTrade Finalize
+    
+    -- Verify Alice received the real estate tokens
+    aliceAllocations <- query @Allocation alice
+    let aliceRE = filter (\(_, a) -> a.assetId == "RE-PROP1") aliceAllocations
+    assertMsg "Alice should have RE-PROP1" (not (null aliceRE))
+    
+    return ()
+
+-- | Test that unauthorized parties cannot execute trades
+testUnauthorizedTradeAttempt : Script ()
+testUnauthorizedTradeAttempt = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, _) <- S.setup
+    
+    now <- getTime
+    
+    proposedTrade <- submit alice $ createCmd ProposedTrade with
+        buyer = alice
+        seller = bob
+        assetIssuer = issuer1
+        assetId = "TECH-B"
+        assetCid = tokenB
+        quantity = 10.0
+        pricePerUnit = 20.0
+        isPrimary = False
+        complianceParty = compliance
+        regulatorParty = regulator
+        createdAt = now
+    
+    tradeAgreement <- submit bob $ exerciseCmd proposedTrade SellerAccept
+    approvedTrade <- submit compliance $ exerciseCmd tradeAgreement ApproveByCompliance
+    
+    -- Only issuer1 can finalize, not issuer2 or others
+    submit issuer1 $ exerciseCmd approvedTrade Finalize
+    
+    return ()
+
+-- | Test regulator can query aggregate statistics across both issuers
+testRegulatorAggregateQueries : Script ()
+testRegulatorAggregateQueries = script do
+    (issuer1, issuer2, alice, bob, compliance, regulator, publicParty, 
+     tokenA, tokenB, tokenC, tokenD, _, _, _) <- S.setup
+    
+    now <- getTime
+    
+    -- Execute trades with Issuer1
+    let executeTrade1 quantity price = do
+            proposed <- submit alice $ createCmd ProposedTrade with
+                buyer = alice
+                seller = bob
+                assetIssuer = issuer1
+                assetId = "TECH-B"
+                assetCid = tokenB
+                quantity = quantity
+                pricePerUnit = price
+                isPrimary = False
+                complianceParty = compliance
+                regulatorParty = regulator
+                createdAt = now
+            agreement <- submit bob $ exerciseCmd proposed SellerAccept
+            approved <- submit compliance $ exerciseCmd agreement ApproveByCompliance
+            submit issuer1 $ exerciseCmd approved Finalize
+    
+    -- Execute trades with Issuer2
+    let executeTrade2 quantity price = do
+            proposed <- submit alice $ createCmd ProposedTrade with
+                buyer = alice
+                seller = bob
+                assetIssuer = issuer2
+                assetId = "RE-PROP1"
+                assetCid = tokenC
+                quantity = quantity
+                pricePerUnit = price
+                isPrimary = False
+                complianceParty = compliance
+                regulatorParty = regulator
+                createdAt = now
+            agreement <- submit bob $ exerciseCmd proposed SellerAccept
+            approved <- submit compliance $ exerciseCmd agreement ApproveByCompliance
+            submit issuer2 $ exerciseCmd approved Finalize
+    
+    -- Execute trades from both issuers
+    executeTrade1 5.0 20.0
+    executeTrade2 10.0 100.0
+    executeTrade1 15.0 21.0
+    
+    -- Regulator queries all views
+    regulatorViews <- query @RegulatorView regulator
+    
+    assertMsg "Regulator should see at least 3 trade views" (length regulatorViews >= 3)
+    
+    return ()

@@ -1,0 +1,7 @@
+{
+  "party": "Regulator",
+  "participant": "participant-regulator",
+  "publicKeyBase64": "MCowBQYDK2VwAyEAQT981UCDM4zuYtvB6P9XtLkuZNR9AdLqY8LY0h4pYkU=",
+  "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIBUNkvHhre7vmKE/HPwxY9fFSh9eX8zLiaceOnQhx0nz\n-----END PRIVATE KEY-----\n",
+  "warning": "This file contains a private key. Use only for local development; do NOT store in production or commit to VCS."
+}

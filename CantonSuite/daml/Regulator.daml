@@ -1,0 +1,13 @@
+module Regulator where
+
+template RegulatorView
+  with
+    regulator   : Party
+    assetId     : Text
+    quantity    : Decimal
+    buyerPseudo : Text
+    issuer      : Party
+    executedAt  : Time
+  where
+    signatory issuer      -- Only issuer signs
+    observer regulator    -- Regulator observes
