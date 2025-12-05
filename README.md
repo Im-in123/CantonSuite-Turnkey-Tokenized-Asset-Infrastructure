@@ -19,9 +19,9 @@
 ---
 
 ## 📝 Project Description
-**CantonSuite+** is a modular, permissioned trading and compliance platform built on the Canton Network, designed for boutique institutions. It enables issuers to tokenize Real-World Assets (RWA), buyers to trade with built-in KYC, and regulators to audit securely via privacy-preserving dashboards. 
+**CantonSuite+** is a modular, permissioned trading and compliance platform built on the Canton Network with integrated DeFi layer for lending and borrowing, yield distribution and fractionalized trading, and privacy preserving live audit for regulators, designed for boutique institutions. It enables issuers to tokenize Real-World Assets (RWA), buyers to trade with built-in KYC, and regulators to audit securely via privacy-preserving dashboards. 
 
-By unifying issuer, buyer, compliance, and regulator workflows with an integrated DeFi layer for lending and borrowing, yield distribution and fractionalized trading, and privacy preserving live audit for regulators. CantonSuite+ transforms tokenized finance from complex backend infrastructure into a practical, accessible, and fully compliant ecosystem.
+By unifying issuer, buyer, compliance, and regulator workflows. CantonSuite+ transforms tokenized finance from complex backend infrastructure into a practical, accessible, and fully compliant ecosystem.
 
 ---
 
@@ -29,9 +29,9 @@ By unifying issuer, buyer, compliance, and regulator workflows with an integrate
 Smaller financial institutions and asset managers face high barriers to entry when adopting blockchain technology:
 
 1.  **Infrastructure Gap:** Lack of turnkey solutions to tokenize and trade niche assets (Real Estate, Private Equity) without hiring a full blockchain team.
-2.  **Regulatory Friction:** Compliance checks are often manual or disconnected from the ledger, making audits difficult.
+2.  **Regulatory Friction:** Compliance checks are often manual or disconnected from the ledger, making audits difficult. They usually have a hard choice: either they see nothing (and can't verify solvency) or they demand everything (names, addresses, IDs), which creates massive liability for them (holding toxic data) and violates privacy laws like GDPR.
 3.  **Capital Inefficiency:** Tokenized assets often sit idle. There is a lack of integrated infrastructure to generate yield or borrow against RWAs.
-4.  **Privacy Concerns:** Public blockchains expose too much data; existing private chains often lack interoperability and usually expose Personally Identifiable Information (PII).
+4.  **Privacy Concerns:** Public blockchains expose too much data; existing private chains often lack interoperability and usually expose Personally Identifiable Information (PII). Buyers and Issuers want to remain compliant, but they don't want regualtory breach(or hackers who breach the regulator) to see their entire trade history and real names
 
 ## 💡 The Solution
 CantonSuite+ utilizes the **Canton Network's** privacy and sub-transaction privacy features to create a unified platform with four distinct, role-based dashboards:
