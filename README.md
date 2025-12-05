@@ -13,7 +13,7 @@
 
 **Click the image below or the link to watch the walkthrough:**
 
-### [▶️ Watch Demo Video](./demo.mp4)
+### [▶️ Watch/Download Demo Video](./demo.mp4)
 *(Download or view the `demo.mp4` file located in the root directory)*
 
 ---
