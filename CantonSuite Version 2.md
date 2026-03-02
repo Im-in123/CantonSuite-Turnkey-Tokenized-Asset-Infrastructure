@@ -1,4 +1,5 @@
-NB: These Changes have not pushed yet. They only exist locally because of breaking changes.
+
+**NB: These Changes have not pushed yet. They only exist locally because of breaking changes.**
 
 1. Network Interoperability & Infrastructure
 Atomic Synchronizer Migration: 3-step "Move" protocol (Lock-Migrate-Recreate) allowing assets to move atomically between private and global network segments.
@@ -19,3 +20,16 @@ Dual-Auth Clawback Logic: Multi-party recovery requiring both Issuer and Complia
 Hashed AML Commitment Pattern: Proactive sanctions checking using privacy-preserving hashes; issues single-use clearance vouchers to prevent data leakage.
 "Dust Sweep" Safety Protocol: Mandatory buy-back workflow that prevents fractional units from becoming "trapped" during asset policy changes.
 Atomic Audit Enforcement: Hard-coded logic ensuring no trade, mint, or burn can execute without an accompanying Regulator Audit View in the same transaction.
+
+
+***Roadmap & Milestones***
+Short-term:
+  - CantonCoin and CIP-0056 integration
+  - Partnerships with regulators for live sandbox trials
+  Explore interoperability with regulated standards (e.g., ERC-3643)
+Mid-term:
+  - Cross-network compatibility beyond Canton
+  - Expand lending pools and yield strategies
+Long-term: 
+  - Integrate off-chain asset verification/oracles
+  - User testing with boutique firms
