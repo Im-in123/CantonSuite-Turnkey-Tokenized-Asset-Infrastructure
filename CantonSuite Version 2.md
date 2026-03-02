@@ -23,13 +23,13 @@ Atomic Audit Enforcement: Hard-coded logic ensuring no trade, mint, or burn can 
 
 
 ***Roadmap & Milestones***
-Short-term:
+*-Short-term:
   - CantonCoin and CIP-0056 integration
   - Partnerships with regulators for live sandbox trials
   Explore interoperability with regulated standards (e.g., ERC-3643)
-Mid-term:
+*-Mid-term:
   - Cross-network compatibility beyond Canton
   - Expand lending pools and yield strategies
-Long-term: 
+*-Long-term: 
   - Integrate off-chain asset verification/oracles
   - User testing with boutique firms
