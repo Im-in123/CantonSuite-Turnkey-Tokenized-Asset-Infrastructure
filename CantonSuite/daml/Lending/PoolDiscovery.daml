@@ -1,0 +1,476 @@
+-- | Lending.PoolDiscovery - Four-Tier Pool Discovery System
+-- Mirrors the Marketplace multi-tier structure for lending pool visibility
+-- ✅ TIER 1: Global Pool Discovery (public)
+-- ✅ TIER 2: Firm Pool Listings (institutional access)
+-- ✅ TIER 3: Invited Lender Access (whitelist)
+-- ✅ TIER 4: Bilateral Pool Agreements (one-to-one)
+
+module Lending.PoolDiscovery where
+
+import DA.Time
+import DA.List (elem)
+import Lending.Pool
+import Lending.Types
+
+-------------------------------
+-- Supporting Data Types
+-------------------------------
+
+data PoolVisibilityTier
+  = GlobalPoolTier
+  | FirmPoolTier
+  | InvitedPoolTier
+  | BilateralPoolTier
+  deriving (Eq, Show)
+
+data PoolAccessRequest = PoolAccessRequest
+  with
+    requester        : Party
+    poolListingId    : Text
+    requestedAmount  : Decimal
+    requestType      : Text
+    submittedAt      : Time
+  deriving (Eq, Show)
+
+-------------------------------
+-- TIER 1: Global Pool Discovery
+-------------------------------
+
+template GlobalPoolDiscovery
+  with
+    listingId        : Text
+    poolOperator     : Party
+    poolCid          : ContractId LendingPool
+    assetId          : Text
+    interestRate     : Decimal
+    minimumDeposit   : Decimal
+    minimumBorrow    : Decimal
+    createdAt        : Time
+    expiresAt        : Time
+    complianceParty  : Party
+    discoveryService : Party
+    observers        : [Party]  -- Known potential depositors/borrowers
+  where
+    signatory poolOperator
+    observer discoveryService :: observers
+
+    ensure
+      interestRate >= 0.0 &&
+      minimumDeposit > 0.0 &&
+      minimumBorrow > 0.0
+
+    choice ExpressPoolInterest : ContractId PoolAccessIntent
+      with
+        participant      : Party
+        desiredRole      : Text  -- "DEPOSITOR" or "BORROWER"
+        desiredAmount    : Decimal
+        collateralOffered : Optional Text
+      controller participant
+      do
+        now <- getTime
+        assertMsg "Pool listing expired" (now <= expiresAt)
+        assertMsg "Amount below minimum" $
+          if desiredRole == "DEPOSITOR"
+          then desiredAmount >= minimumDeposit
+          else desiredAmount >= minimumBorrow
+
+        create PoolAccessIntent with
+          listingId    = listingId
+          poolOperator = poolOperator
+          participant  = participant
+          role         = desiredRole
+          amount       = desiredAmount
+          collateral   = collateralOffered
+          intentType   = "GLOBAL-POOL-DISCOVERY"
+          createdAt    = now
+          poolCid      = poolCid
+
+    choice ClosePoolListing : ()
+      controller poolOperator
+      do pure ()
+
+-------------------------------
+-- TIER 2: Firm Pool Listing
+-------------------------------
+
+template FirmPoolListing
+  with
+    listingId        : Text
+    poolOperator     : Party
+    poolCid          : ContractId LendingPool
+    assetId          : Text
+    interestRate     : Decimal
+    minimumDeposit   : Decimal
+    minimumBorrow    : Decimal
+    firmId           : Text
+    createdAt        : Time
+    expiresAt        : Time
+    complianceParty  : Party
+    observers        : [Party]
+  where
+    signatory poolOperator
+    observer complianceParty :: observers
+
+    ensure
+      interestRate >= 0.0 &&
+      minimumDeposit > 0.0 &&
+      minimumBorrow > 0.0
+
+    choice CreateFirmPoolInterest : ContractId PoolAccessIntent
+      with
+        participant      : Party
+        desiredRole      : Text
+        desiredAmount    : Decimal
+        membershipCid    : ContractId FirmMembership
+        collateralOffered : Optional Text
+      controller participant
+      do
+        now <- getTime
+        assertMsg "Pool listing expired" (now <= expiresAt)
+
+        -- Verify firm membership
+        membership <- fetch membershipCid
+        assertMsg "Wrong member" (membership.member == participant)
+        assertMsg "Wrong firm" (membership.membershipId == firmId)
+        assertMsg "No pool access" (elem "FIRM-POOL" membership.tierAccess)
+
+        assertMsg "Amount below minimum" $
+          if desiredRole == "DEPOSITOR"
+          then desiredAmount >= minimumDeposit
+          else desiredAmount >= minimumBorrow
+
+        create PoolAccessIntent with
+          listingId    = listingId
+          poolOperator = poolOperator
+          participant  = participant
+          role         = desiredRole
+          amount       = desiredAmount
+          collateral   = collateralOffered
+          intentType   = "FIRM-POOL-MEMBER"
+          createdAt    = now
+          poolCid      = poolCid
+
+-------------------------------
+-- TIER 3: Invited Lender/Borrower Access
+-------------------------------
+
+template InvitedPoolParticipant
+  with
+    invitationId     : Text
+    poolOperator     : Party
+    participant      : Party
+    poolCid          : ContractId LendingPool
+    assetId          : Text
+    interestRate     : Decimal
+    maxAmount        : Decimal
+    allowedRole      : Text  -- "DEPOSITOR" or "BORROWER"
+    expiresAt        : Time
+    complianceParty  : Party
+    invitationType   : Text
+  where
+    signatory poolOperator
+    observer participant, complianceParty
+
+    ensure maxAmount > 0.0
+
+    choice AcceptPoolInvitation : ContractId PoolAccessIntent
+      with
+        desiredAmount    : Decimal
+        collateralOffered : Optional Text
+      controller participant
+      do
+        now <- getTime
+        assertMsg "Invitation expired" (now <= expiresAt)
+        assertMsg "Amount exceeds maximum" (desiredAmount <= maxAmount)
+
+        create PoolAccessIntent with
+          listingId    = invitationId
+          poolOperator = poolOperator
+          participant  = participant
+          role         = allowedRole
+          amount       = desiredAmount
+          collateral   = collateralOffered
+          intentType   = "INVITED-POOL-PARTICIPANT"
+          createdAt    = now
+          poolCid      = poolCid
+
+    choice DeclinePoolInvitation : ()
+      controller participant
+      do pure ()
+
+    choice RevokePoolInvitation : ()
+      controller poolOperator
+      do pure ()
+
+-------------------------------
+-- TIER 4: Bilateral Pool Agreement
+-------------------------------
+
+template BilateralPoolAgreement
+  with
+    agreementId      : Text
+    poolOperator     : Party
+    counterparty     : Party
+    poolCid          : ContractId LendingPool
+    assetId          : Text
+    interestRate     : Decimal
+    agreedAmount     : Decimal
+    agreedRole       : Text  -- "DEPOSITOR" or "BORROWER"
+    expiresAt        : Time
+    createdAt        : Time
+    complianceParty  : Party
+    terms            : Text
+  where
+    signatory poolOperator
+    observer counterparty, complianceParty
+
+    ensure agreedAmount > 0.0
+
+    choice AcceptBilateralPool : ContractId PoolAccessIntent
+      with
+        collateralOffered : Optional Text
+      controller counterparty, poolOperator
+      do
+        now <- getTime
+        assertMsg "Agreement expired" (now <= expiresAt)
+
+        create PoolAccessIntent with
+          listingId    = agreementId
+          poolOperator = poolOperator
+          participant  = counterparty
+          role         = agreedRole
+          amount       = agreedAmount
+          collateral   = collateralOffered
+          intentType   = "BILATERAL-POOL-AGREEMENT"
+          createdAt    = now
+          poolCid      = poolCid
+
+    choice DeclineBilateralPool : ()
+      controller counterparty
+      do pure ()
+
+    choice CancelBilateralPool : ()
+      controller poolOperator
+      do pure ()
+
+-------------------------------
+-- Pool Access Intent (analogous to PurchaseIntent)
+-------------------------------
+
+template PoolAccessIntent
+  with
+    listingId    : Text
+    poolOperator : Party
+    participant  : Party
+    role         : Text  -- "DEPOSITOR" or "BORROWER"
+    amount       : Decimal
+    collateral   : Optional Text
+    intentType   : Text
+    createdAt    : Time
+    poolCid      : ContractId LendingPool
+  where
+    signatory participant
+    observer poolOperator
+
+    ensure amount > 0.0
+
+    choice AcceptPoolIntent : ()
+      with
+        notes : Text
+      controller poolOperator
+      do
+        -- Pool operator accepts the intent
+        -- Actual loan/deposit creation happens via existing Pool workflows
+        pure ()
+
+    choice RejectPoolIntent : ()
+      with
+        reason : Text
+      controller poolOperator
+      do
+        assertMsg "Must provide reason" (reason /= "")
+        pure ()
+
+    choice WithdrawPoolIntent : ()
+      controller participant
+      do pure ()
+
+-------------------------------
+-- Firm Membership (reused from Marketplace pattern)
+-------------------------------
+
+template FirmMembership
+  with
+    firm         : Party
+    member       : Party
+    membershipId : Text
+    approvedAt   : Time
+    tierAccess   : [Text]  -- e.g., ["FIRM-MARKETPLACE", "FIRM-POOL"]
+  where
+    signatory firm
+    observer member
+
+    choice RevokeMembership : ()
+      controller firm
+      do pure ()
+
+-------------------------------
+-- Privacy-Preserving Pool Listing (unified visibility model)
+-------------------------------
+
+data PoolListingVisibility = PoolListingVisibility
+  with
+    tier              : PoolVisibilityTier
+    firmMembership    : Optional Text
+    selectedParticipants : [Party]
+    directCounterparty : Optional Party
+  deriving (Eq, Show)
+
+template PrivacyPreservingPoolListing
+  with
+    listingId        : Text
+    poolOperator     : Party
+    poolCid          : ContractId LendingPool
+    assetId          : Text
+    interestRate     : Decimal
+    minimumAmount    : Decimal
+    visibility       : PoolListingVisibility
+    createdAt        : Time
+    expiresAt        : Time
+    complianceParty  : Party
+  where
+    signatory poolOperator
+    observer complianceParty
+
+    choice CreateBilateralPoolAgreement : ContractId BilateralPoolAgreement
+      controller poolOperator
+      do
+        assertMsg "Wrong tier for bilateral" (visibility.tier == BilateralPoolTier)
+        assertMsg "No counterparty specified" (visibility.directCounterparty /= None)
+
+        now <- getTime
+        let Some counterparty = visibility.directCounterparty
+
+        create BilateralPoolAgreement with
+          agreementId      = listingId
+          poolOperator     = poolOperator
+          counterparty     = counterparty
+          poolCid          = poolCid
+          assetId          = assetId
+          interestRate     = interestRate
+          agreedAmount     = minimumAmount
+          agreedRole       = "BORROWER"  -- Default, can be parameterized
+          expiresAt        = expiresAt
+          createdAt        = now
+          complianceParty  = complianceParty
+          terms            = "Bilateral pool agreement"
+
+    choice InviteSelectedParticipant : ContractId InvitedPoolParticipant
+      with
+        participant : Party
+        maxAmount   : Decimal
+        role        : Text
+      controller poolOperator
+      do
+        assertMsg "Wrong tier for invitations" (visibility.tier == InvitedPoolTier)
+        assertMsg "Participant not on whitelist" (elem participant visibility.selectedParticipants)
+
+        now <- getTime
+
+        create InvitedPoolParticipant with
+          invitationId     = listingId <> "-" <> show participant
+          poolOperator     = poolOperator
+          participant      = participant
+          poolCid          = poolCid
+          assetId          = assetId
+          interestRate     = interestRate
+          maxAmount        = maxAmount
+          allowedRole      = role
+          expiresAt        = expiresAt
+          complianceParty  = complianceParty
+          invitationType   = "SELECTED"
+
+-------------------------------
+-- Syndicated Pool (analogous to ClubDeal)
+-------------------------------
+
+template SyndicatedPool
+  with
+    syndicateId      : Text
+    leadArranger     : Party
+    poolCid          : ContractId LendingPool
+    assetId          : Text
+    totalCommitment  : Decimal
+    interestRate     : Decimal
+    minimumShare     : Decimal
+    maximumLenders   : Int
+    currentLenders   : Int
+    expiresAt        : Time
+    complianceParty  : Party
+    observers        : [Party]
+  where
+    signatory leadArranger
+    observer complianceParty :: observers
+
+    ensure
+      totalCommitment > 0.0 &&
+      minimumShare > 0.0 &&
+      maximumLenders > 0 &&
+      currentLenders >= 0 &&
+      currentLenders <= maximumLenders
+
+    choice CommitToSyndicate : ContractId SyndicateCommitment
+      with
+        lender           : Party
+        commitmentAmount : Decimal
+      controller lender
+      do
+        now <- getTime
+        assertMsg "Syndicate expired" (now <= expiresAt)
+        assertMsg "Commitment below minimum" (commitmentAmount >= minimumShare)
+        assertMsg "Maximum lenders reached" (currentLenders < maximumLenders)
+
+        -- Update syndicate
+        _ <- create this with currentLenders = currentLenders + 1
+
+        create SyndicateCommitment with
+          syndicateId      = syndicateId
+          leadArranger     = leadArranger
+          lender           = lender
+          commitmentAmount = commitmentAmount
+          poolCid          = poolCid
+          assetId          = assetId
+          interestRate     = interestRate
+          committedAt      = now
+          complianceParty  = complianceParty
+
+template SyndicateCommitment
+  with
+    syndicateId      : Text
+    leadArranger     : Party
+    lender           : Party
+    commitmentAmount : Decimal
+    poolCid          : ContractId LendingPool
+    assetId          : Text
+    interestRate     : Decimal
+    committedAt      : Time
+    complianceParty  : Party
+  where
+    signatory lender
+    observer leadArranger, complianceParty
+
+    choice SettleSyndicateCommitment : ()
+      with
+        lenderDepositCid : ContractId DepositEffect
+      controller leadArranger
+      do
+        -- Settlement logic handled by existing Pool deposit workflow
+        pure ()
+
+    choice WithdrawSyndicateCommitment : ()
+      with
+        reason : Text
+      controller lender
+      do
+        assertMsg "Must provide reason" (reason /= "")
+        pure ()

@@ -1,0 +1,530 @@
+-- | Lending.CrossRegistryCollateral - Registry-Agnostic Lending with Fee Monetization
+-- ✅ SECTION F.4: Cross-Registry Collateral
+-- ✅ SECTION F.5: Smart Contract Monetization Logic
+-- ✅ FIXED: Removed explicit `archive self` from AddCollateralAsset and RemoveCollateralAsset
+-- ✅ FIXED: ExecuteTradeWithFees controller includes platformParty
+-- ✅ FIXED: Zero-fee trades don't create platform holding
+-- ✅ UPDATED: Removed Oracle dependency, now uses RWAInstrument intrinsic price
+
+module Lending.CrossRegistryCollateral where
+
+import DA.Time
+import DA.Map qualified as Map
+import DA.List (head)
+import Lending.Types
+import Lending.Pool (LendingPool)
+import Portfolio (Holding_Impl(..))
+import TokenStandard.Interfaces
+
+import Finance.Instruments (RWAInstrument)
+
+-------------------------------
+-- ✅ F.5: FEE STRUCTURES
+-------------------------------
+
+data FeeStructure = FeeStructure
+  with
+    originationFeeBps : Decimal  -- E.g., 50 = 0.50% of loan amount
+    managementFeeBps  : Decimal  -- E.g., 200 = 2.00% annual
+    tradingFeeBps     : Decimal  -- E.g., 30 = 0.30% of trade value
+    redemptionFeeBps  : Decimal  -- E.g., 25 = 0.25% of redemption
+    performanceFeeBps : Decimal  -- E.g., 2000 = 20% of profits
+  deriving (Eq, Show)
+
+-- Helper: Calculate fee from basis points
+calculateFee : Decimal -> Decimal -> Decimal
+calculateFee amount bps = (amount * bps) / 10000.0
+
+-- Helper: Calculate annual fee prorated
+calculateProRataFee : Decimal -> Decimal -> Int -> Decimal
+calculateProRataFee amount annualBps days = 
+  (amount * annualBps * intToDecimal days) / (10000.0 * 365.0)
+
+-------------------------------
+-- ✅ F.4: COLLATERAL REGISTRY
+-------------------------------
+
+-- Whitelist of acceptable collateral assets
+template CollateralRegistry
+  with
+    registry       : Party
+    compliance     : Party
+    acceptedAssets : [(InstrumentId, CollateralTerms)]
+  where
+    signatory registry
+    observer compliance
+    
+    -- ✅ F.4: Check if asset is accepted as collateral
+    nonconsuming choice IsAcceptedCollateral : Bool
+      with checkInstrument : InstrumentId
+      controller registry
+      do
+        let accepted = any (\(inst, _) -> inst == checkInstrument) acceptedAssets
+        return accepted
+    
+    -- ✅ F.4: Get collateral terms for asset
+    nonconsuming choice GetCollateralTerms : Optional CollateralTerms
+      with checkInstrument : InstrumentId
+      controller registry
+      do
+        let result = filter (\(inst, _) -> inst == checkInstrument) acceptedAssets
+        if null result then
+          return None
+        else
+          return (Some (snd (head result)))
+    
+    -- ✅ FIXED: Removed explicit `archive self` - consuming choice archives automatically
+    choice AddCollateralAsset : ContractId CollateralRegistry
+      with
+        newInstrument : InstrumentId
+        terms         : CollateralTerms
+      controller registry
+      do
+        now <- getTime
+        create this with
+          acceptedAssets = acceptedAssets ++ [(newInstrument, terms)]
+    
+    -- ✅ FIXED: Removed explicit `archive self` - consuming choice archives automatically
+    choice RemoveCollateralAsset : ContractId CollateralRegistry
+      with
+        instrumentToRemove : InstrumentId
+      controller registry
+      do
+        let filtered = filter (\(inst, _) -> inst /= instrumentToRemove) acceptedAssets
+        create this with acceptedAssets = filtered
+
+data CollateralTerms = CollateralTerms
+  with
+    maxLTV           : Decimal  -- Max loan-to-value (e.g., 0.75 = 75%)
+    liquidationLTV   : Decimal  -- Liquidation threshold (e.g., 0.80 = 80%)
+    minimumValueUSD  : Decimal  -- Minimum collateral value
+    haircut          : Decimal  -- Discount applied to value (e.g., 0.10 = 10% haircut)
+  deriving (Eq, Show)
+
+-------------------------------
+-- ✅ F.4: CROSS-REGISTRY LOAN REQUEST
+-------------------------------
+
+template CrossRegistryLoanRequest
+  with
+    borrower             : Party
+    poolOperator         : Party
+    lendingAsset         : InstrumentId  -- What they want to borrow
+    collateralAsset      : InstrumentId  -- ✅ F.4: Can be ANY CIP-0056 asset
+    collateralCid        : ContractId Holding
+    requestedAmount      : Decimal
+    collateralAmount     : Decimal
+    durationDays         : Int
+    collateralRegistryCid: ContractId CollateralRegistry
+    createdAt            : Time
+    feeStructure         : FeeStructure  -- ✅ F.5: Explicit fees
+  where
+    signatory borrower
+    observer poolOperator
+    
+    -- ✅ F.4 + F.5: Approve with cross-registry collateral + fees
+    choice ApproveCrossRegistryLoan : (ContractId CrossRegistryLoan, Decimal)
+      with
+        poolCid                 : ContractId LendingPool
+        collateralInstrumentCid : ContractId RWAInstrument  -- ✅ ADDED: Use instrument for price
+      controller poolOperator
+      do
+        now <- getTime
+        
+        -- ✅ F.4: Verify collateral is accepted
+        collateralRegistry <- fetch collateralRegistryCid
+        isAccepted <- exercise collateralRegistryCid IsAcceptedCollateral with
+          checkInstrument = collateralAsset
+        assertMsg "Collateral asset not accepted" isAccepted
+        
+        -- Get collateral terms
+        termsOpt : Optional CollateralTerms <- exercise collateralRegistryCid GetCollateralTerms with
+          checkInstrument = collateralAsset
+        
+        -- Extract terms or fail
+        terms <- case termsOpt of
+          Some t -> return t
+          None -> error "Collateral terms not found"
+        
+        -- ✅ UPDATED: Fetch instrument and use intrinsic price
+        collateralInstrument <- fetch collateralInstrumentCid
+        let price = collateralInstrument.pricePerUnit
+        
+        -- ✅ F.4: Calculate collateral value with haircut
+        let collateralValueUSD = collateralAmount * price * (1.0 - terms.haircut)
+        assertMsg "Collateral below minimum" (collateralValueUSD >= terms.minimumValueUSD)
+        
+        -- ✅ F.4: Verify LTV ratio
+        let ltv = requestedAmount / collateralValueUSD
+        assertMsg ("LTV too high. Max: " <> show terms.maxLTV) (ltv <= terms.maxLTV)
+        
+        -- Verify collateral holding
+        collateral <- fetch collateralCid
+        assertMsg "Collateral mismatch" (getInstrument_H collateral == collateralAsset)
+        assertMsg "Insufficient collateral" (getAmount_H collateral >= collateralAmount)
+        assertMsg "Collateral is locked" (not (isLocked collateral))
+        
+        -- ✅ F.5: Calculate origination fee
+        let originationFee = calculateFee requestedAmount feeStructure.originationFeeBps
+        let netLoanAmount = requestedAmount - originationFee
+        
+        -- Archive collateral
+        archive collateralCid
+        
+        -- Create locked collateral holding
+        lockedCollateral <- create Holding_Impl with
+          owner = borrower
+          assetId = collateralAsset.id
+          quantity = collateralAmount
+          issuer = collateralAsset.issuer
+          compliance = poolOperator
+          locked = True
+          lockContext = Some ("Loan collateral: " <> show requestedAmount)
+          metadata = Map.fromList
+            [ ("loan-asset", lendingAsset.id)
+            , ("loan-amount", show requestedAmount)
+            , ("collateral-value-usd", show collateralValueUSD)
+            , ("ltv-ratio", show ltv)
+            ]
+          observers   = [] 
+        
+        -- Return change if any
+        if getAmount_H collateral > collateralAmount then do
+          _ <- create Holding_Impl with
+            owner = borrower
+            assetId = collateralAsset.id
+            quantity = getAmount_H collateral - collateralAmount
+            issuer = collateralAsset.issuer
+            compliance = poolOperator
+            locked = False
+            lockContext = None
+            metadata = Map.empty
+            observers   = [] 
+          pure ()
+        else pure ()
+        
+        -- Create loan principal holding for borrower
+        loanHolding <- create Holding_Impl with
+          owner = borrower
+          assetId = lendingAsset.id
+          quantity = netLoanAmount  -- ✅ F.5: After fee deduction
+          issuer = poolOperator
+          compliance = poolOperator
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("loan-type", "cross-registry")
+            , ("origination-fee", show originationFee)
+            , ("gross-loan", show requestedAmount)
+            ]
+          observers   = [] 
+        
+        -- Create origination fee holding for pool operator
+        feeHolding <- create Holding_Impl with
+          owner = poolOperator
+          assetId = lendingAsset.id
+          quantity = originationFee
+          issuer = poolOperator
+          compliance = poolOperator
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("fee-type", "origination")
+            , ("borrower", show borrower)
+            , ("loan-amount", show requestedAmount)
+            ]
+          observers   = [] 
+        
+        -- Create loan contract
+        let maturityDate = addRelTime now (days durationDays)
+        loan <- create CrossRegistryLoan with
+          borrower = borrower
+          lender = poolOperator
+          lendingAsset = lendingAsset
+          collateralAsset = collateralAsset
+          principal = requestedAmount
+          netPrincipal = netLoanAmount
+          originationFee = originationFee
+          collateralAmount = collateralAmount
+          collateralValueUSD = collateralValueUSD
+          lockedCollateralCid = toInterfaceContractId lockedCollateral
+          originationDate = now
+          maturityDate = maturityDate
+          ltv = ltv
+          liquidationLTV = terms.liquidationLTV
+          feeStructure = feeStructure
+          status = Active
+        
+        return (loan, originationFee)
+
+-------------------------------
+-- ✅ F.4 + F.5: CROSS-REGISTRY LOAN
+-------------------------------
+
+template CrossRegistryLoan
+  with
+    borrower            : Party
+    lender              : Party
+    lendingAsset        : InstrumentId
+    collateralAsset     : InstrumentId  -- ✅ F.4: Cross-registry
+    principal           : Decimal
+    netPrincipal        : Decimal       -- ✅ F.5: After fees
+    originationFee      : Decimal       -- ✅ F.5: Fee collected
+    collateralAmount    : Decimal
+    collateralValueUSD  : Decimal
+    lockedCollateralCid : ContractId Holding
+    originationDate     : Time
+    maturityDate        : Time
+    ltv                 : Decimal
+    liquidationLTV      : Decimal
+    feeStructure        : FeeStructure
+    status              : LoanStatus
+  where
+    signatory borrower, lender
+    
+    -- ✅ F.5: Repay with management fee
+    choice RepayLoanWithFees : (ContractId Holding, ContractId Holding, Decimal, Decimal)
+      with
+        repaymentHoldingCid : ContractId Holding
+      controller borrower
+      do
+        now <- getTime
+        
+        -- Calculate interest
+        let daysPassed = calculateDaysBetween originationDate now
+        let interestAmount = (principal * 0.10 * daysPassed) / 365.0  -- 10% annual rate
+        
+        -- ✅ F.5: Calculate pro-rated management fee
+        let managementFee = calculateProRataFee principal feeStructure.managementFeeBps (truncate daysPassed)
+        
+        -- Total repayment including fees
+        let totalRepayment = principal + interestAmount + managementFee
+        
+        -- Verify repayment
+        repayment <- fetch repaymentHoldingCid
+        assertMsg "Insufficient repayment" (getAmount_H repayment >= totalRepayment)
+        
+        -- Archive repayment
+        archive repaymentHoldingCid
+        
+        -- Return change if overpaid
+        if getAmount_H repayment > totalRepayment then do
+          _ <- create Holding_Impl with
+            owner = borrower
+            assetId = (getInstrument_H repayment).id
+            quantity = getAmount_H repayment - totalRepayment
+            issuer = lender
+            compliance = lender
+            locked = False
+            lockContext = None
+            metadata = Map.empty
+            observers   = [] 
+          pure ()
+        else pure ()
+        
+        -- Create lender payment holding (principal + interest)
+        lenderPayment <- create Holding_Impl with
+          owner = lender
+          assetId = lendingAsset.id
+          quantity = principal + interestAmount
+          issuer = lender
+          compliance = lender
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("loan-repayment", "true")
+            , ("principal", show principal)
+            , ("interest", show interestAmount)
+            ]
+          observers   = [] 
+        
+        -- ✅ F.5: Create management fee holding
+        managementFeeHolding <- create Holding_Impl with
+          owner = lender
+          assetId = lendingAsset.id
+          quantity = managementFee
+          issuer = lender
+          compliance = lender
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("fee-type", "management")
+            , ("borrower", show borrower)
+            , ("days-charged", show daysPassed)
+            ]
+          observers   = [] 
+        
+        -- Unlock collateral
+        lockedCollateral <- fetch lockedCollateralCid
+        archive lockedCollateralCid
+        
+        unlockedCollateral <- create Holding_Impl with
+          owner = borrower
+          assetId = collateralAsset.id
+          quantity = collateralAmount
+          issuer = collateralAsset.issuer
+          compliance = lender
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("loan-repaid", "true")
+            , ("repayment-date", show now)
+            ]
+          observers   = [] 
+        
+        return (
+          toInterfaceContractId lenderPayment,
+          toInterfaceContractId unlockedCollateral,
+          interestAmount,
+          managementFee
+          )
+    
+    -- ✅ F.4: Liquidate with cross-registry collateral
+    choice LiquidateCrossRegistryLoan : (ContractId Holding, Decimal)
+      with collateralInstrumentCid : ContractId RWAInstrument  -- ✅ UPDATED: Use instrument for price
+      controller lender
+      do
+        now <- getTime
+        
+        -- ✅ UPDATED: Fetch instrument and use intrinsic price
+        collateralInstrument <- fetch collateralInstrumentCid
+        let price = collateralInstrument.pricePerUnit
+        
+        let currentCollateralValueUSD = collateralAmount * price
+        let currentLTV = principal / currentCollateralValueUSD
+        
+        -- Check if liquidation threshold breached
+        assertMsg "LTV not breached" (currentLTV >= liquidationLTV)
+        
+        -- Transfer locked collateral to lender
+        lockedCollateral <- fetch lockedCollateralCid
+        archive lockedCollateralCid
+        
+        liquidatedCollateral <- create Holding_Impl with
+          owner = lender
+          assetId = collateralAsset.id
+          quantity = collateralAmount
+          issuer = collateralAsset.issuer
+          compliance = lender
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("liquidation", "true")
+            , ("liquidation-ltv", show currentLTV)
+            , ("liquidation-date", show now)
+            , ("borrower", show borrower)
+            ]
+          observers   = [] 
+        
+        return (toInterfaceContractId liquidatedCollateral, currentLTV)
+
+-------------------------------
+-- ✅ F.5: TRADE WITH EXPLICIT FEES
+-------------------------------
+
+data TradeWithFeesResult = TradeWithFeesResult
+  with
+    buyerHolding   : ContractId Holding
+    sellerHolding  : ContractId Holding
+    platformFee    : Decimal
+    feeHolding     : Optional (ContractId Holding)  -- ✅ CHANGED: Optional for zero-fee case
+  deriving (Eq, Show)
+
+template TradeAgreementWithFees
+  with
+    buyer          : Party
+    seller         : Party
+    issuer         : Party
+    assetId        : Text
+    quantity       : Decimal
+    pricePerUnit   : Decimal
+    feeStructure   : FeeStructure  -- ✅ F.5: Explicit fees
+    platformParty  : Party         -- ✅ F.5: Fee recipient
+  where
+    signatory buyer, seller
+    observer issuer, platformParty
+    
+    -- ✅ F.5: Execute with platform fees
+    -- ✅ FIXED: Controller includes platformParty for authorization
+    choice ExecuteTradeWithFees : TradeWithFeesResult
+      with
+        buyerPaymentCid : ContractId Holding
+        sellerAssetCid  : ContractId Holding
+      controller issuer, platformParty  -- ✅ CHANGED: Added platformParty
+      do
+        -- Verify holdings
+        buyerPayment <- fetch buyerPaymentCid
+        sellerAsset <- fetch sellerAssetCid
+        
+        let grossPrice = quantity * pricePerUnit
+        
+        -- ✅ F.5: Calculate trading fee
+        let tradingFee = calculateFee grossPrice feeStructure.tradingFeeBps
+        let netPrice = grossPrice - tradingFee
+        
+        assertMsg "Insufficient payment" (getAmount_H buyerPayment >= grossPrice)
+        assertMsg "Insufficient assets" (getAmount_H sellerAsset >= quantity)
+        
+        -- Archive old holdings
+        archive buyerPaymentCid
+        archive sellerAssetCid
+        
+        now <- getTime
+        
+        -- Buyer receives asset
+        buyerAsset <- create Holding_Impl with
+          owner = buyer
+          assetId = assetId
+          quantity = quantity
+          issuer = issuer
+          compliance = issuer
+          locked = False
+          lockContext = None
+          metadata = Map.fromList [("trade-fee-paid", show tradingFee)]
+          observers   = [] 
+        
+        -- Seller receives net payment (after fees)
+        sellerPayment <- create Holding_Impl with
+          owner = seller
+          assetId = (getInstrument_H buyerPayment).id
+          quantity = netPrice
+          issuer = issuer
+          compliance = issuer
+          locked = False
+          lockContext = None
+          metadata = Map.fromList [("net-after-fees", show netPrice)]
+          observers   = [] 
+        
+        -- ✅ F.5: Platform receives trading fee (only if non-zero)
+        -- ✅ FIXED: Don't create holding with 0.0 quantity
+        feeHoldingOpt <- if tradingFee > 0.0 then do
+          platformFeeHolding <- create Holding_Impl with
+            owner = platformParty
+            assetId = (getInstrument_H buyerPayment).id
+            quantity = tradingFee
+            issuer = issuer
+            compliance = issuer
+            locked = False
+            lockContext = None
+            metadata = Map.fromList
+              [ ("fee-type", "trading")
+              , ("trade-value", show grossPrice)
+              , ("buyer", show buyer)
+              , ("seller", show seller)
+              ]
+            observers   = [] 
+          return (Some (toInterfaceContractId platformFeeHolding))
+        else
+          return None
+        
+        return TradeWithFeesResult with
+          buyerHolding = toInterfaceContractId buyerAsset
+          sellerHolding = toInterfaceContractId sellerPayment
+          platformFee = tradingFee
+          feeHolding = feeHoldingOpt  -- ✅ CHANGED: Now Optional
+
+-- Helper function
+calculateDaysBetween : Time -> Time -> Decimal
+calculateDaysBetween start end = 
+  let diffMicro = convertRelTimeToMicroseconds (subTime end start)
+  in intToDecimal diffMicro / 1000000.0 / 86400.0

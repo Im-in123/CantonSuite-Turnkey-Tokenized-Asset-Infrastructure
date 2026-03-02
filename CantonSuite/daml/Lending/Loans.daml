@@ -1,0 +1,433 @@
+-- | Lending.Loans - Loan request and management
+ 
+-- ✅ ENHANCED: Added explicit synchronizer compatibility checks to ApproveLoan
+--              Mining rounds check timing, but synchronizer checks verify all contracts
+--              (borrower collateral, pool liquidity, loan) are on the same synchronizer.
+
+module Lending.Loans where
+
+import DA.Time
+import DA.Text (sha256)
+import DA.Map qualified as Map
+import Lending.Types
+import Lending.Pool
+import Portfolio (Holding_Impl(..))
+import TokenStandard.Interfaces
+import TokenStandard.FOP_Transfers
+import CantonCoin.MiningRoundSync
+
+template LoanRequest
+  with
+    borrower          : Party
+    poolOperator      : Party
+    assetId           : Text
+    requestedAmount   : Decimal
+    collateralAssetId : Text
+    collateralAmount  : Decimal
+    collateralCid     : ContractId Holding
+    durationDays      : Int
+    createdAt         : Time
+    complianceParty   : Party
+    regulatorParty    : Party
+    miningRoundCid    : Optional (ContractId MiningRoundReference)
+  where
+    signatory borrower
+    observer poolOperator, complianceParty
+
+    -- ✅ ENHANCED: Added synchronizer compatibility parameters
+    choice ApproveLoan : (ContractId Loan, ContractId TransferInstruction, ContractId LendingRegulatorView)
+      with
+        poolCid               : ContractId LendingPool
+        existingCashCid       : Optional (ContractId Holding)
+        -- ✅ NEW: Synchronizer compatibility parameters
+        borrowerCurrentSync   : Text  -- Current sync where borrower's collateral resides
+        poolCurrentSync       : Text  -- Current sync where pool's liquidity resides
+        targetSync            : Text  -- Target sync for the loan transaction
+      controller poolOperator
+      do
+        -- ✅ NEW: Explicit synchronizer compatibility check
+        -- Mining rounds check timing/validity, but this checks that all contracts
+        -- involved in the loan are on the same synchronizer for atomic execution
+        let needsBorrowerMigration = borrowerCurrentSync /= targetSync
+        let needsPoolMigration = poolCurrentSync /= targetSync
+        
+        if needsBorrowerMigration || needsPoolMigration then do
+          let borrowerMsg = if needsBorrowerMigration
+                           then "Borrower's collateral on '" <> borrowerCurrentSync <> "' must migrate to '" <> targetSync <> "'"
+                           else ""
+          let poolMsg = if needsPoolMigration
+                       then "Pool's liquidity on '" <> poolCurrentSync <> "' must migrate to '" <> targetSync <> "'"
+                       else ""
+          let separator = if needsBorrowerMigration && needsPoolMigration then "; " else ""
+          let errorMsg = "Cannot approve loan - synchronizer migration required: " <> borrowerMsg <> separator <> poolMsg
+          assertMsg errorMsg False
+        else
+          pure ()
+
+        pool <- fetch poolCid
+        assertMsg "Pool is not Open" (pool.status == Open)
+        assertMsg "Insufficient Liquidity" (pool.totalLiquidity >= requestedAmount)
+
+        case miningRoundCid of
+          Some roundCid -> do
+            -- ✅ FIXED: Pass caller = poolOperator
+            isValid <- exercise roundCid IsRoundValid with caller = poolOperator
+            assertMsg "Canton Coin mining round expired" isValid
+            hasTime <- exercise roundCid HasTimeForExternalSigning with
+              estimatedSigningDelaySeconds = 120
+              caller = poolOperator
+            assertMsg "Not enough time in mining round" hasTime
+          None -> pure ()
+
+        collateral <- fetch collateralCid
+        assertMsg "Collateral mismatch" ((getInstrument_H collateral).id == collateralAssetId)
+        assertMsg "Insufficient collateral" (getAmount_H collateral >= collateralAmount)
+
+        now <- getTime
+
+        collateralTransferCid <- create TransferInstruction_Impl with
+          sender     = borrower
+          receiver   = poolOperator
+          instrument = InstrumentId with
+            depository = poolOperator
+            issuer     = poolOperator
+            id         = collateralAssetId
+            version    = "0"
+          amount           = collateralAmount
+          deadline         = addRelTime now (hours 1)
+          status           = Pending
+          metadata         = Map.fromList
+            [ ("cantonsuite.io/transfer-type", "LOAN-COLLATERAL")
+            , ("cantonsuite.io/loan-amount",    show requestedAmount)
+            , ("cantonsuite.io/initiated-at",   show now)
+            , ("cantonsuite.io/synchronizer",   targetSync)  -- ✅ NEW: Track sync
+            ]
+          senderHoldingCid = collateralCid
+
+        archive collateralCid
+
+        if getAmount_H collateral > collateralAmount then do
+          _ <- create Holding_Impl with
+            owner       = borrower
+            assetId     = collateralAssetId
+            quantity    = getAmount_H collateral - collateralAmount
+            issuer      = poolOperator
+            compliance  = pool.complianceParty
+            locked      = False
+            lockContext = None
+            metadata    = emptyMetadata
+            observers   = [] 
+          pure ()
+        else pure ()
+
+        archive poolCid
+        newPoolCid <- create pool with
+          totalLiquidity = pool.totalLiquidity - requestedAmount
+          totalBorrowed  = pool.totalBorrowed + requestedAmount
+          sequenceNumber = pool.sequenceNumber + 1
+
+        loanHoldingCid <- case existingCashCid of
+          Some cid -> do
+            c <- fetch cid
+            archive cid
+            create Holding_Impl with
+              owner       = borrower
+              assetId     = assetId
+              quantity    = getAmount_H c + requestedAmount
+              issuer      = poolOperator
+              compliance  = pool.complianceParty
+              locked      = False
+              lockContext = None
+              metadata    = emptyMetadata
+              observers   = [] 
+          None ->
+            create Holding_Impl with
+              owner       = borrower
+              assetId     = assetId
+              quantity    = requestedAmount
+              issuer      = poolOperator
+              compliance  = pool.complianceParty
+              locked      = False
+              lockContext = None
+              metadata    = emptyMetadata
+              observers   = [] 
+
+        let maturityDate = addRelTime now (days durationDays)
+
+        loanCid <- create Loan with
+          borrower              = borrower
+          lender                = poolOperator
+          assetId               = assetId
+          principal             = requestedAmount
+          interestRate          = pool.interestRate
+          collateralAssetId     = collateralAssetId
+          collateralAmount      = collateralAmount
+          collateralTransferCid = toInterfaceContractId collateralTransferCid
+          originationDate       = now
+          maturityDate          = maturityDate
+          status                = Active
+          regulatorParty        = regulatorParty
+          complianceParty       = pool.complianceParty
+          miningRoundCid        = miningRoundCid
+
+        let borrowerHash = sha256 (show borrower)
+        let loanIdHash   = sha256 (show loanCid <> show now)
+
+        regulatorCid <- create LendingRegulatorView with
+          regulator       = regulatorParty
+          poolOperator    = poolOperator
+          loanIdHash      = loanIdHash
+          borrowerHash    = borrowerHash
+          assetId         = assetId
+          principal       = requestedAmount
+          collateralRatio = (collateralAmount / requestedAmount) * 100.0
+          interestRate    = pool.interestRate
+          status          = "ACTIVE"
+          originationDate = now
+          maturityDate    = maturityDate
+          eventType       = "LOAN_ORIGINATED"
+          eventTimestamp  = now
+
+        return (loanCid, toInterfaceContractId collateralTransferCid, regulatorCid)
+
+    choice RejectLoan : ()
+      controller poolOperator
+      do pure ()
+
+    choice CancelRequest : ()
+      controller borrower
+      do pure ()
+
+template Loan
+  with
+    borrower              : Party
+    lender                : Party
+    assetId               : Text
+    principal             : Decimal
+    interestRate          : InterestRate
+    collateralAssetId     : Text
+    collateralAmount      : Decimal
+    collateralTransferCid : ContractId TransferInstruction
+    originationDate       : Time
+    maturityDate          : Time
+    status                : LoanStatus
+    regulatorParty        : Party
+    complianceParty       : Party
+    miningRoundCid        : Optional (ContractId MiningRoundReference)
+  where
+    signatory borrower, lender
+    observer complianceParty
+
+    ensure principal > 0.0
+
+    choice RepayLoan : (ContractId TransferInstruction, ContractId TransferInstruction, ContractId LendingPool, ContractId LendingRegulatorView)
+      with
+        repaymentHoldingCid   : ContractId Holding
+        poolCid               : ContractId LendingPool
+        existingCollateralCid : Optional (ContractId Holding)
+      controller borrower
+      do
+        case miningRoundCid of
+          Some roundCid -> do
+            -- ✅ FIXED: Pass caller = borrower
+            isValid <- exercise roundCid IsRoundValid with caller = borrower
+            assertMsg "Canton Coin mining round expired" isValid
+          None -> pure ()
+
+        now <- getTime
+        let daysPassed     = calculateDaysBetween originationDate now
+        let interestAmount = principal * (interestRate / 100.0) * (daysPassed / 365.0)
+        let totalRepayment = principal + interestAmount
+
+        repayment <- fetch repaymentHoldingCid
+        assertMsg ("Insufficient funds. Need " <> show totalRepayment) (getAmount_H repayment >= totalRepayment)
+
+        repaymentTransferCid <- create TransferInstruction_Impl with
+          sender     = borrower
+          receiver   = lender
+          instrument = InstrumentId with
+            depository = lender
+            issuer     = lender
+            id         = assetId
+            version    = "0"
+          amount           = totalRepayment
+          deadline         = addRelTime now (hours 1)
+          status           = Pending
+          metadata         = Map.fromList
+            [ ("cantonsuite.io/transfer-type", "LOAN-REPAYMENT")
+            , ("cantonsuite.io/principal",      show principal)
+            , ("cantonsuite.io/interest",        show interestAmount)
+            , ("cantonsuite.io/initiated-at",    show now)
+            , (cip0056Reason, "Loan repayment with interest")
+            ]
+          senderHoldingCid = repaymentHoldingCid
+
+        archive repaymentHoldingCid
+
+        if getAmount_H repayment > totalRepayment then do
+          _ <- create Holding_Impl with
+            owner       = borrower
+            assetId     = (getInstrument_H repayment).id
+            quantity    = getAmount_H repayment - totalRepayment
+            issuer      = lender
+            compliance  = complianceParty
+            locked      = False
+            lockContext = None
+            metadata    = emptyMetadata
+            observers   = [] 
+          pure ()
+        else pure ()
+
+        pool <- fetch poolCid
+        archive poolCid
+        newPoolCid <- create pool with
+          totalBorrowed  = pool.totalBorrowed - principal
+          totalLiquidity = pool.totalLiquidity + principal + interestAmount
+          sequenceNumber = pool.sequenceNumber + 1
+
+        let concreteCollateralTransferCid = coerceContractId @TransferInstruction @TransferInstruction_Impl collateralTransferCid
+        concreteCollateralTransfer <- fetch concreteCollateralTransferCid
+        let collateralHoldingCid = concreteCollateralTransfer.senderHoldingCid
+
+        collateralReturnCid <- create TransferInstruction_Impl with
+          sender     = lender
+          receiver   = borrower
+          instrument = InstrumentId with
+            depository = lender
+            issuer     = lender
+            id         = collateralAssetId
+            version    = "0"
+          amount           = collateralAmount
+          deadline         = addRelTime now (hours 1)
+          status           = Pending
+          metadata         = Map.fromList
+            [ ("cantonsuite.io/transfer-type", "COLLATERAL-RETURN")
+            , ("cantonsuite.io/loan-id",        show self)
+            , ("cantonsuite.io/initiated-at",    show now)
+            , (cip0056Reason, "Collateral release after loan repayment")
+            ]
+          senderHoldingCid = collateralHoldingCid
+
+        let borrowerHash = sha256 (show borrower)
+        let loanIdHash   = sha256 (show self <> show originationDate)
+
+        regulatorCid <- create LendingRegulatorView with
+          regulator       = regulatorParty
+          poolOperator    = lender
+          loanIdHash      = loanIdHash
+          borrowerHash    = borrowerHash
+          assetId         = assetId
+          principal       = principal
+          collateralRatio = (collateralAmount / principal) * 100.0
+          interestRate    = interestRate
+          status          = "REPAID"
+          originationDate = originationDate
+          maturityDate    = maturityDate
+          eventType       = "LOAN_REPAID"
+          eventTimestamp  = now
+
+        return (toInterfaceContractId repaymentTransferCid, toInterfaceContractId collateralReturnCid, newPoolCid, regulatorCid)
+
+    choice LiquidateCollateral : (ContractId TransferInstruction, ContractId LendingPool, ContractId LendingRegulatorView)
+      with
+        poolCid : ContractId LendingPool
+      controller lender
+      do
+        now <- getTime
+        assertMsg "Loan not yet matured" (now > maturityDate)
+
+        -- ✅ FIXED: Check mining round if present (caller = lender)
+        case miningRoundCid of
+          Some roundCid -> do
+            isValid <- exercise roundCid IsRoundValid with caller = lender
+            assertMsg "Canton Coin mining round expired" isValid
+            
+            hasTime <- exercise roundCid HasTimeForExternalSigning with
+              estimatedSigningDelaySeconds = 120
+              caller = lender
+            assertMsg "Not enough time in mining round for liquidation" hasTime
+          None -> pure ()
+
+        let concreteCollateralTransferCid = coerceContractId @TransferInstruction @TransferInstruction_Impl collateralTransferCid
+        concreteCollateralTransfer <- fetch concreteCollateralTransferCid
+        let collateralHoldingCid = concreteCollateralTransfer.senderHoldingCid
+
+        liquidationTransferCid <- create TransferInstruction_Impl with
+          sender     = borrower
+          receiver   = lender
+          instrument = InstrumentId with
+            depository = lender
+            issuer     = lender
+            id         = collateralAssetId
+            version    = "0"
+          amount           = collateralAmount
+          deadline         = addRelTime now (hours 1)
+          status           = Executed
+          metadata         = Map.fromList
+            [ ("cantonsuite.io/transfer-type",    "COLLATERAL-LIQUIDATION")
+            , ("cantonsuite.io/loan-id",           show self)
+            , ("cantonsuite.io/defaulted-amount",  show principal)
+            , ("cantonsuite.io/initiated-at",      show now)
+            , (cip0056Reason, "Collateral liquidated due to loan default")
+            ]
+          
+          
+          senderHoldingCid = collateralHoldingCid
+
+        pool <- fetch poolCid
+        archive poolCid
+        newPoolCid <- create pool with
+          totalBorrowed  = pool.totalBorrowed - principal
+          sequenceNumber = pool.sequenceNumber + 1
+
+        let borrowerHash = sha256 (show borrower)
+        let loanIdHash   = sha256 (show self <> show originationDate)
+
+        regulatorCid <- create LendingRegulatorView with
+          regulator       = regulatorParty
+          poolOperator    = lender
+          loanIdHash      = loanIdHash
+          borrowerHash    = borrowerHash
+          assetId         = assetId
+          principal       = principal
+          collateralRatio = (collateralAmount / principal) * 100.0
+          interestRate    = interestRate
+          status          = "LIQUIDATED"
+          originationDate = originationDate
+          maturityDate    = maturityDate
+          eventType       = "LOAN_LIQUIDATED"
+          eventTimestamp  = now
+
+        return (toInterfaceContractId liquidationTransferCid, newPoolCid, regulatorCid)
+
+    choice ExtendLoan : ContractId Loan
+      with additionalDays : Int
+      controller borrower, lender
+      do
+        create this with maturityDate = addRelTime maturityDate (days additionalDays)
+
+template LendingRegulatorView
+  with
+    regulator       : Party
+    poolOperator    : Party
+    loanIdHash      : Text
+    borrowerHash    : Text
+    assetId         : Text
+    principal       : Decimal
+    collateralRatio : Decimal
+    interestRate    : Decimal
+    status          : Text
+    originationDate : Time
+    maturityDate    : Time
+    eventType       : Text
+    eventTimestamp  : Time
+  where
+    signatory poolOperator
+    observer regulator
+
+calculateDaysBetween : Time -> Time -> Decimal
+calculateDaysBetween start end =
+  let diffMicro = convertRelTimeToMicroseconds (subTime end start)
+  in if diffMicro < 3600000000
+     then 0.0
+     else intToDecimal diffMicro / 1000000.0 / 86400.0

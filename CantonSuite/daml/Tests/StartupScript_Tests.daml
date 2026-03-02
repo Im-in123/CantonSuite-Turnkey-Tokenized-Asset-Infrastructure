@@ -1,0 +1,171 @@
+-- | Tests/StartupScript_Tests.daml
+-- Comprehensive test suite following legal template transitions
+
+module Tests.StartupScript_Tests where
+
+import Daml.Script
+import DA.Time
+import DA.Assert
+
+-- Import StartupScript
+import Scripts.StartupScript
+
+-- Import modules for validation
+import Types
+import Finance.Instruments
+import Portfolio
+import TokenStandard.Interfaces
+import Compliance.SanctionsRegistry
+import Lending.Pool
+import Lending.Types qualified as LT
+import Distribution.ClaimBased
+import Finance.FractionalizationSafety
+import Redemption.Atomic
+import Network.SynchronizerMigration qualified as Sync
+import CantonCoin.MiningRoundSync
+
+----------------------------------------------------------------------
+-- INDIVIDUAL PHASE TESTS
+----------------------------------------------------------------------
+
+testPhase1_PlatformSetup : Script ()
+testPhase1_PlatformSetup = script do
+  setup <- setupPlatformAndUsers
+  Some aliceKYCData <- queryContractId setup.alice setup.aliceKYC
+  assert (aliceKYCData.status == KApproved)
+  debug "✅ TEST 1 PASSED"
+
+testPhase2_AssetTokenization : Script ()
+testPhase2_AssetTokenization = script do
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  Some propertyInstrument <- queryContractId setup.issuer assets.propertyToken
+  assert (propertyInstrument.name == "Commercial Real Estate Token")
+  debug "✅ TEST 2 PASSED"
+
+testPhase3_MiningRoundSetup : Script ()
+testPhase3_MiningRoundSetup = script do
+  setup <- setupPlatformAndUsers
+  miningRound <- setupMiningRound setup
+  isValid <- submit setup.amuletApp $ exerciseCmd miningRound.miningRound IsRoundValid with
+    caller = setup.amuletApp
+  assert (isValid == True)
+  debug "✅ TEST 3 PASSED"
+
+testPhase4_MarketplaceOperations : Script ()
+testPhase4_MarketplaceOperations = script do
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  marketplace <- setupMarketplace setup assets
+  Some globalData <- queryContractId setup.issuer marketplace.globalListing
+  assert (globalData.listingId == "GLOBAL-PROPERTY-001")
+  debug "✅ TEST 4 PASSED"
+
+testPhase5_TradeAndDVP : Script ()
+testPhase5_TradeAndDVP = script do
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  miningRound <- setupMiningRound setup
+  trade <- executeTradeAndDVP setup assets miningRound
+  Some regulatorViewData <- queryContractId setup.regulator trade.regulatorView
+  assert (regulatorViewData.eventType == "TRADE")
+  debug "✅ TEST 5 PASSED"
+
+testPhase6_FOPTransfers : Script ()
+testPhase6_FOPTransfers = script do
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  _ <- executeFOPTransfers setup assets
+  debug "✅ TEST 6 PASSED"
+
+testPhase7_LendingPool : Script ()
+testPhase7_LendingPool = script do
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  miningRound <- setupMiningRound setup
+  lending <- setupLendingPool setup assets miningRound
+  -- ✅ FIX: Validate current pool state (returning updated CID)
+  Some poolData <- queryContractId setup.poolOperator lending.lendingPool
+  assert (poolData.totalBorrowed == 40000.0)
+  debug "✅ TEST 7 PASSED"
+
+testPhase8_CrossRegistryLoan : Script ()
+testPhase8_CrossRegistryLoan = script do
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  miningRound <- setupMiningRound setup
+  crossLoan <- setupCrossRegistryLoan setup assets miningRound
+  Some loanData <- queryContractId setup.bob crossLoan.loan
+  assert (loanData.principal == 10000.0)
+  debug "✅ TEST 8 PASSED"
+
+testPhase9_DividendDistribution : Script ()
+testPhase9_DividendDistribution = script do
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  dividend <- distributeDividends setup assets
+  Some announcementData <- queryContractId setup.issuer dividend.announcement
+  assert (announcementData.perUnitAmount == 50.0)
+  debug "✅ TEST 9 PASSED"
+
+testPhase10_FractionalizationSafety : Script ()
+testPhase10_FractionalizationSafety = script do
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  _ <- testFractionalizationSafety setup assets
+  debug "✅ TEST 10 PASSED"
+
+testPhase11_SynchronizerMigration : Script ()
+testPhase11_SynchronizerMigration = script do
+  debug "TEST 11: Phase 11 - Synchronizer Migration"
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  migration <- testSynchronizerMigration setup assets
+  
+  -- ✅ FIX: SynchronizerMigrationRequest is archived after approval.
+  -- Query for the resulting Workflow instead.
+  allWorkflows <- query @Sync.MigrationWorkflow setup.alice
+  let workflows = filter (\(cid, _) -> cid == migration.migrationWorkflow) allWorkflows
+  case workflows of
+    [(_, workflowData)] -> do
+      assert (workflowData.requester == setup.alice)
+      assert (workflowData.targetSync == "us-east")
+    _ -> error "Could not find migration workflow"
+  debug "✅ TEST 11 PASSED"
+
+testPhase12_RedemptionWorkflow : Script ()
+testPhase12_RedemptionWorkflow = script do
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  _ <- testRedemption setup assets
+  debug "✅ TEST 12 PASSED"
+
+----------------------------------------------------------------------
+-- INTEGRATION TESTS
+----------------------------------------------------------------------
+
+testFullIntegration : Script ()
+testFullIntegration = script do
+  runCompleteStartupDemo
+  debug "✅ TEST 13 PASSED - FULL INTEGRATION SUCCESS"
+
+----------------------------------------------------------------------
+-- MAIN TEST RUNNER
+----------------------------------------------------------------------
+
+runAllTests : Script ()
+runAllTests = script do
+  testPhase1_PlatformSetup
+  testPhase2_AssetTokenization
+  testPhase3_MiningRoundSetup
+  testPhase4_MarketplaceOperations
+  testPhase5_TradeAndDVP
+  testPhase6_FOPTransfers
+  testPhase7_LendingPool
+  testPhase8_CrossRegistryLoan
+  testPhase9_DividendDistribution
+  testPhase10_FractionalizationSafety
+  testPhase11_SynchronizerMigration
+  testPhase12_RedemptionWorkflow
+  testFullIntegration
+  return ()

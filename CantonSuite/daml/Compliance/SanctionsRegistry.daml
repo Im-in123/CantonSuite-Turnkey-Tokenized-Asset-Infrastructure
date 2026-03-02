@@ -1,0 +1,141 @@
+-- | Compliance.SanctionsRegistry - AML/Sanctions Clearance via Commitment Pattern
+-- ✅ NEW FILE: Implements Task 1.4 (Proactive AML Blacklist)
+--
+-- DESIGN: Commitment pattern (NOT an on-ledger list that DVP observes).
+--
+-- PROBLEM WITH NAIVE APPROACH: If SanctionsRegistry is an observer on DVPSettlement,
+-- the full sanctions list is visible to all DVP participants — a severe privacy leak.
+--
+-- SOLUTION: Compliance performs the check off-ledger, then issues a per-trade
+-- SanctionsClearance voucher (on-ledger proof). DVP requires clearances as inputs.
+-- The full sanctions list NEVER appears on the DVP observer set. Only the compliance
+-- party ever sees the registry. Clearances are short-lived and single-use.
+--
+-- INTEGRATION: DVP_Settlement.ExecuteAtomicDVP requires buyerClearanceCid and
+-- sellerClearanceCid. Both clearances are consumed atomically with settlement.
+--
+-- ✅ FIXED: Removed explicit `archive self` from AddSanctionedEntity and
+--           RemoveSanctionedEntity. DAML consuming choices archive the contract
+--           implicitly — calling `archive self` inside a consuming choice archives
+--           it a second time mid-transaction, causing "consumed in same transaction".
+
+module Compliance.SanctionsRegistry where
+
+import DA.Text (sha256)
+import DA.Time
+
+-------------------------------
+-- SANCTIONS REGISTRY
+-- The hashed registry. Never appears on DVP observer sets.
+-------------------------------
+
+template SanctionsRegistry
+  with
+    compliance       : Party
+    regulator        : Party
+    sanctionedHashes : [Text]  -- SHA-256(show party) for each sanctioned entity
+    lastUpdated      : Time
+    listVersion      : Text
+  where
+    signatory compliance
+    observer regulator
+
+    -- ✅ FIXED: Removed `archive self`. Consuming choices archive implicitly in DAML.
+    --           The old code did: archive self → create this with ...
+    --           That caused "Attempt to exercise a contract that was consumed in same transaction"
+    --           because `archive self` fired first, then the implicit archive fired again.
+    choice AddSanctionedEntity : ContractId SanctionsRegistry
+      with
+        partyHash : Text
+        reason    : Text
+      controller compliance
+      do
+        now <- getTime
+        create this with
+          sanctionedHashes = sanctionedHashes ++ [partyHash]
+          lastUpdated      = now
+
+    -- ✅ FIXED: Same fix — removed `archive self`.
+    choice RemoveSanctionedEntity : ContractId SanctionsRegistry
+      with partyHash : Text
+      controller compliance
+      do
+        now <- getTime
+        create this with
+          sanctionedHashes = filter (/= partyHash) sanctionedHashes
+          lastUpdated      = now
+
+    -- Check if a party is sanctioned (nonconsuming — compliance can check many parties)
+    nonconsuming choice CheckSanctioned : Bool
+      with partyHash : Text
+      controller compliance
+      do
+        return (partyHash `elem` sanctionedHashes)
+
+    -- Issue a clearance certificate after off-ledger check passes.
+    -- settlementWindow: how long (seconds) the clearance is valid for.
+    nonconsuming choice IssueClearance : ContractId SanctionsClearance
+      with
+        partyToCheck     : Party
+        tradeId          : Text
+        settlementWindow : Int   -- seconds; e.g. 3600 = 1 hour
+      controller compliance
+      do
+        now <- getTime
+
+        -- Compute hash and verify party is NOT sanctioned
+        let partyHash    = sha256 (show partyToCheck)
+        let isSanctioned = partyHash `elem` sanctionedHashes
+        assertMsg ("Party is on sanctions list. Trade " <> tradeId <> " blocked.") (not isSanctioned)
+
+        create SanctionsClearance with
+          compliance   = compliance
+          clearedParty = partyToCheck
+          tradeId      = tradeId
+          issuedAt     = now
+          expiresAt    = addRelTime now (seconds settlementWindow)
+          consumed     = False
+
+-------------------------------
+-- SANCTIONS CLEARANCE CERTIFICATE
+-- Per-trade, short-lived, single-use proof that a party passed sanctions check.
+-- DVP requires one for buyer and one for seller.
+-------------------------------
+
+template SanctionsClearance
+  with
+    compliance   : Party
+    clearedParty : Party
+    tradeId      : Text
+    issuedAt     : Time
+    expiresAt    : Time
+    consumed     : Bool
+  where
+    signatory compliance
+    observer clearedParty
+
+    ensure not consumed  -- Active clearances only
+
+    -- Called atomically during DVP settlement to consume the clearance
+    choice ConsumeClearance : ()
+      controller compliance
+      do
+        now <- getTime
+        assertMsg "Clearance has expired"       (now <= expiresAt)
+        assertMsg "Clearance already consumed"  (not consumed)
+        -- Consuming choice: implicit archive, no `archive self` needed
+        pure ()
+
+    -- Nonconsuming verify (for pre-flight checks without consuming)
+    nonconsuming choice VerifyClearance : Bool
+      controller compliance
+      do
+        now <- getTime
+        return (now <= expiresAt && not consumed)
+
+-------------------------------
+-- HELPER: Compute party hash for off-ledger comparison
+-------------------------------
+
+computePartyHash : Party -> Text
+computePartyHash party = sha256 (show party)

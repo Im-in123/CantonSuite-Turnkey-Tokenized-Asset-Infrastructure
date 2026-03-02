@@ -1,0 +1,229 @@
+-- | TokenStandard.Interfaces - CIP-0056 Canton Network Token Standard Interfaces
+-- Clean version with unique method names to avoid conflicts
+-- ✅ FIXED: Added getOwner_H helper function for Trade.daml
+module TokenStandard.Interfaces where
+
+import DA.Map (Map)
+import DA.Map qualified as Map
+import DA.Optional (fromOptional)
+
+-------------------------------
+-- Core Types
+-------------------------------
+
+type Metadata = Map Text Text
+
+data InstrumentId = InstrumentId
+  with
+    depository : Party
+    issuer     : Party
+    id         : Text
+    version    : Text
+  deriving (Eq, Show, Ord)
+
+data AccountId = AccountId
+  with
+    custodian : Party
+    owner     : Party
+    id        : Text
+  deriving (Eq, Show, Ord)
+
+cip0056LockContext : Text
+cip0056LockContext = "splice.lfdecentralizedtrust.org/lock-context"
+
+cip0056Reason : Text
+cip0056Reason = "splice.lfdecentralizedtrust.org/reason"
+
+cip0056RegistryUrls : Text
+cip0056RegistryUrls = "splice.lfdecentralizedtrust.org/registry-urls"
+
+-------------------------------
+-- API 1: Token Metadata Interface
+-------------------------------
+
+data TokenMetadataView = TokenMetadataView
+  with
+    instrumentId : InstrumentId
+    name         : Text
+    symbol       : Text
+    assetType    : Text
+    registryUrl  : Optional Text
+    metadata     : Metadata
+  deriving (Eq, Show)
+
+interface TokenMetadata where
+  viewtype TokenMetadataView
+  
+  getInstrumentId : InstrumentId
+  getName : Text
+  getSymbol : Text
+  getAssetType : Text
+  getRegistryUrl : Optional Text
+  getMetadata : Metadata
+
+-------------------------------
+-- API 2: Holdings Interface
+-------------------------------
+
+data HoldingView = HoldingView
+  with
+    instrument  : InstrumentId
+    account     : AccountId
+    amount      : Decimal
+    locked      : Bool
+    lockContext : Optional Text
+    metadata    : Metadata
+  deriving (Eq, Show)
+
+interface Holding where
+  viewtype HoldingView
+  
+  getInstrument_H : InstrumentId
+  getAccount : AccountId
+  getAmount_H : Decimal
+  isLocked : Bool
+  getLockContext : Optional Text
+
+-- ✅ Helper function to get owner from holding (used by Trade.daml)
+getOwner_H : Holding -> Party
+getOwner_H holding = 
+  let account = getAccount holding
+  in account.owner
+
+-------------------------------
+-- API 3: Transfer Instruction Interface
+-------------------------------
+
+data TransferStatus
+  = Pending
+  | Executed
+  | Aborted
+  | Withdrawn
+  deriving (Eq, Show)
+
+data TransferResult = TransferResult
+  with
+    receiverHoldingCid : ContractId Holding
+    resultMetadata     : Metadata
+  deriving (Eq, Show)
+
+data TransferInstructionView = TransferInstructionView
+  with
+    sender     : Party
+    receiver   : Party
+    instrument : InstrumentId
+    amount     : Decimal
+    deadline   : Time
+    status     : TransferStatus
+    metadata   : Metadata
+  deriving (Eq, Show)
+
+interface TransferInstruction where
+  viewtype TransferInstructionView
+  
+  getSender : Party
+  getReceiver : Party
+  getInstrument_TI : InstrumentId
+  getAmount_TI : Decimal
+  getDeadline_TI : Time
+  getStatus : TransferStatus
+
+-------------------------------
+-- API 4: Allocation Interface
+-------------------------------
+
+data AllocationResult = AllocationResult
+  with
+    receiverHoldingCid : ContractId Holding
+    resultMetadata     : Metadata
+  deriving (Eq, Show)
+
+data AllocationView = AllocationView
+  with
+    owner         : Party
+    instrument    : InstrumentId
+    amount        : Decimal
+    settlementId  : Text
+    deadline      : Time
+    settlementApp : Party
+    metadata      : Metadata
+  deriving (Eq, Show)
+
+interface Allocation where
+  viewtype AllocationView
+  
+  getOwner : Party
+  getInstrument_A : InstrumentId
+  getAmount_A : Decimal
+  getSettlementId_A : Text
+  getDeadline_A : Time
+  getSettlementApp_A : Party
+
+-------------------------------
+-- API 5: Allocation Request Interface
+-------------------------------
+
+data AllocationRequestView = AllocationRequestView
+  with
+    holder        : Party
+    instrument    : InstrumentId
+    amount        : Decimal
+    settlementId  : Text
+    deadline      : Time
+    settlementApp : Party
+    metadata      : Metadata
+  deriving (Eq, Show)
+
+interface AllocationRequest where
+  viewtype AllocationRequestView
+  
+  getHolder_AR : Party
+  getInstrument_AR : InstrumentId
+  getAmount_AR : Decimal
+  getSettlementId_AR : Text
+  getDeadline_AR : Time
+  getSettlementApp_AR : Party
+
+-------------------------------
+-- API 6: Allocation Instruction Interface
+-------------------------------
+
+data AllocationInstructionView = AllocationInstructionView
+  with
+    holder        : Party
+    instrument    : InstrumentId
+    amount        : Decimal
+    settlementId  : Text
+    deadline      : Time
+    settlementApp : Party
+    metadata      : Metadata
+  deriving (Eq, Show)
+
+interface AllocationInstruction where
+  viewtype AllocationInstructionView
+  
+  getHolder_AI : Party
+  getInstrument_AI : InstrumentId
+  getAmount_AI : Decimal
+  getSettlementId_AI : Text
+  getDeadline_AI : Time
+  getSettlementApp_AI : Party
+
+-------------------------------
+-- Helper Functions
+-------------------------------
+
+emptyMetadata : Metadata
+emptyMetadata = Map.empty
+
+addMetadata : Text -> Text -> Metadata -> Metadata
+addMetadata key value meta = Map.insert key value meta
+
+getMetadataValue : Text -> Text -> Metadata -> Text
+getMetadataValue key defaultValue meta = 
+  fromOptional defaultValue (Map.lookup key meta)
+
+hasMetadata : Text -> Metadata -> Bool
+hasMetadata key meta = case Map.lookup key meta of
+  Some _ -> True
+  None -> False

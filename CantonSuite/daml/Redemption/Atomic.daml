@@ -1,0 +1,463 @@
+-- | Redemption - Asset redemption workflow (FIXED: Effect-Based Batching + Sync Awareness)
+-- ✅ ADDED: RedemptionEffect template for consent-based batching
+-- ✅ FIXED: BatchRedemptionRequest now uses effect pattern
+-- ✅ SECTION D.4: Redemption Integrity - Atomic Locking
+-- ✅ SECTION F.1: Atomic Regulatory Audit Enforcement
+-- ✅ NEW: Synchronizer compatibility checks added to ExecuteRedemptionFlow
+
+module Redemption.Atomic where
+
+import DA.List (head)
+import DA.Time
+import DA.Text (sha256)
+import Portfolio (Holding_Impl(..))
+import Finance.Instruments (RWAInstrument)
+import TokenStandard.Interfaces
+import TokenStandard.DVP_Settlement
+import DA.Map qualified as Map
+import Regulator (RegulatorView(..))
+import Compliance.AtomicAudit (AuditedRedemptionResult(..))
+import CantonCoin.MiningRoundSync
+
+-------------------------------
+-- ✅ D.4: REDEMPTION REQUEST
+-------------------------------
+
+template RedemptionRequest
+  with
+    redeemer      : Party
+    issuer        : Party
+    compliance    : Party
+    assetId       : Text
+    quantity      : Decimal
+    reason        : Text
+    requestedAt   : Time
+    deadline      : Time
+    regulatorParty: Party
+    miningRoundCid: Optional (ContractId MiningRoundReference)
+  where
+    signatory redeemer
+    observer issuer, compliance
+    
+    ensure
+      quantity > 0.0 &&
+      deadline > requestedAt
+    
+    choice CreateRedemptionAllocation : ContractId AllocationRequest
+      controller issuer
+      do
+        now <- getTime
+        assertMsg "Request expired" (now <= deadline)
+        
+        case miningRoundCid of
+          Some roundCid -> do
+            isValid <- exercise roundCid IsRoundValid with caller = issuer
+            assertMsg "Canton Coin mining round expired" isValid
+          None -> pure ()
+        
+        allocationReq <- create AllocationRequest_Impl with
+          holder = redeemer
+          instrument = InstrumentId with
+            depository = issuer
+            issuer = issuer
+            id = assetId
+            version = "0"
+          amount = quantity
+          settlementId = "REDEMPTION-" <> show self <> "-" <> show now
+          deadline = deadline
+          settlementApp = issuer
+          metadata = Map.fromList
+            [ ("cantonsuite.io/operation", "redemption")
+            , ("cantonsuite.io/reason", reason)
+            , ("cantonsuite.io/requested-at", show requestedAt)
+            , (cip0056Reason, reason)
+            ]
+        
+        return (toInterfaceContractId allocationReq)
+    
+    choice CancelRedemption : ()
+      controller redeemer
+      do archive self
+
+-------------------------------
+-- REDEMPTION WORKFLOW
+-------------------------------
+
+template RedemptionWorkflow
+  with
+    redeemer           : Party
+    issuer             : Party
+    compliance         : Party
+    regulatorParty     : Party
+    assetId            : Text
+    quantity           : Decimal
+    reason             : Text
+    requestedAt        : Time
+    allocationCid      : ContractId Allocation
+    cashPaymentPending : Bool
+    miningRoundCid     : Optional (ContractId MiningRoundReference)
+  where
+    signatory redeemer, issuer
+    observer compliance, regulatorParty
+    
+    ensure quantity > 0.0
+    
+    choice CompleteRedemptionAtomic : AuditedRedemptionResult
+      with cashAmount : Decimal
+      controller issuer
+      do
+        now <- getTime
+        
+        case miningRoundCid of
+          Some roundCid -> do
+            -- ✅ FIXED: Pass caller = issuer
+            isValid <- exercise roundCid IsRoundValid with caller = issuer
+            assertMsg "Canton Coin mining round expired" isValid
+            
+            hasTime <- exercise roundCid HasTimeForExternalSigning with
+              estimatedSigningDelaySeconds = 120
+              caller = issuer
+            assertMsg "Not enough time in mining round for redemption" hasTime
+          None -> pure ()
+        
+        allocation <- fetch allocationCid
+        assertMsg "Allocation amount mismatch" (getAmount_A allocation >= quantity)
+        assertMsg "Allocation expired" (now <= getDeadline_A allocation)
+        
+        let concreteAllocCid = coerceContractId @Allocation @Allocation_Impl allocationCid
+        concreteAlloc <- fetch concreteAllocCid
+        
+        archive concreteAlloc.lockedHoldingCid
+        archive allocationCid
+        
+        cashHolding <- create Holding_Impl with
+          owner = redeemer
+          assetId = "USD"
+          quantity = cashAmount
+          issuer = issuer
+          compliance = compliance
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("cantonsuite.io/operation", "redemption-payment")
+            , ("cantonsuite.io/redeemed-asset", assetId)
+            , ("cantonsuite.io/redeemed-quantity", show quantity)
+            , ("cantonsuite.io/completed-at", show now)
+            , (cip0056Reason, "Redemption payment for " <> assetId)
+            ]
+          observers   = [] 
+        
+        let redeemerHash = sha256 (show redeemer)
+        let txHash = sha256 (show redeemer <> show quantity <> show now)
+        
+        regulatorViewCid <- create RegulatorView with
+          regulator = regulatorParty
+          assetId = assetId
+          quantity = quantity
+          buyerHash = "BURN-DESTINATION"
+          sellerHash = redeemerHash
+          issuer = issuer
+          executedAt = now
+          eventType = "REDEMPTION"
+          transactionHash = txHash
+        
+        return AuditedRedemptionResult with
+          cashHolding = toInterfaceContractId cashHolding
+          regulatorView = regulatorViewCid
+          redemptionTime = now
+    
+    choice RejectRedemption : ContractId Holding
+      with rejectionReason : Text
+      controller issuer
+      do
+        let concreteAllocCid = coerceContractId @Allocation @Allocation_Impl allocationCid
+        unlockedHolding <- exercise concreteAllocCid WithdrawAllocation with
+          reason = rejectionReason
+          withdrawMetadata = Map.fromList
+            [ ("cantonsuite.io/operation", "redemption-rejected")
+            , ("cantonsuite.io/rejection-reason", rejectionReason)
+            , (cip0056Reason, rejectionReason)
+            ]
+        
+        return unlockedHolding
+    
+    choice WithdrawRedemption : ContractId Holding
+      controller redeemer
+      do
+        let concreteAllocCid = coerceContractId @Allocation @Allocation_Impl allocationCid
+        unlockedHolding <- exercise concreteAllocCid WithdrawAllocation with
+          reason = "Redeemer cancelled redemption"
+          withdrawMetadata = Map.fromList
+            [ ("cantonsuite.io/operation", "redemption-withdrawn")
+            , (cip0056Reason, "Redeemer withdrew redemption request")
+            ]
+        
+        return unlockedHolding
+
+-------------------------------
+-- INITIATE REDEMPTION (Single Redemption) - ✅ ENHANCED WITH SYNC CHECK
+-------------------------------
+
+template InitiateRedemption
+  with
+    redeemer      : Party
+    issuer        : Party
+    compliance    : Party
+    regulatorParty: Party
+    assetId       : Text
+    quantity      : Decimal
+    reason        : Text
+  where
+    signatory redeemer, issuer
+    observer compliance, regulatorParty
+    
+    -- ✅ ENHANCED: Added synchronizer compatibility check
+    choice ExecuteRedemptionFlow : Either Text (ContractId RedemptionWorkflow)
+      with
+        holdingCid           : ContractId Holding
+        deadlineHours        : Int
+        miningRoundCid       : Optional (ContractId MiningRoundReference)
+        redeemerCurrentSync  : Text
+        targetSync           : Text
+      controller redeemer, issuer
+      do
+        now <- getTime
+        let deadline = addRelTime now (hours deadlineHours)
+        
+        -- ✅ Synchronizer compatibility check
+        let needsMigration = redeemerCurrentSync /= targetSync
+        
+        if needsMigration then
+          return (Left ("Cannot initiate redemption - synchronizer migration required: Redeemer on '" <> 
+                       redeemerCurrentSync <> "' must migrate to '" <> targetSync <> 
+                       "' before redemption. Please complete migration before attempting redemption."))
+        else do
+          -- ✅ All checks passed - proceed with redemption
+          
+          case miningRoundCid of
+            Some roundCid -> do
+              -- ✅ FIXED: Pass caller = issuer
+              isValid <- exercise roundCid IsRoundValid with caller = issuer
+              assertMsg "Canton Coin mining round expired before redemption start" isValid
+              
+              hasTime <- exercise roundCid HasTimeForExternalSigning with
+                estimatedSigningDelaySeconds = 300
+                caller = issuer
+              assertMsg "Not enough time in mining round for redemption flow" hasTime
+            None -> pure ()
+          
+          holding <- fetch holdingCid
+          assertMsg "Insufficient balance" (getAmount_H holding >= quantity)
+          assertMsg "Asset mismatch" ((getInstrument_H holding).id == assetId)
+          assertMsg "Holding is locked" (not (isLocked holding))
+          
+          redemptionReq <- create RedemptionRequest with
+            redeemer = redeemer
+            issuer = issuer
+            compliance = compliance
+            regulatorParty = regulatorParty
+            assetId = assetId
+            quantity = quantity
+            reason = reason
+            requestedAt = now
+            deadline = deadline
+            miningRoundCid = miningRoundCid
+          
+          allocationReq <- exercise redemptionReq CreateRedemptionAllocation
+          
+          let concreteReqCid = coerceContractId @AllocationRequest @AllocationRequest_Impl allocationReq
+          allocationInstruction <- exercise concreteReqCid AcceptRequest with
+            holdingCid = holdingCid
+            acceptMetadata = Map.fromList
+              [ ("cantonsuite.io/operation", "redemption-allocation")
+              , ("cantonsuite.io/reason", reason)
+              , ("cantonsuite.io/synchronizer", targetSync)
+              ]
+          
+          handler <- create AllocationExecutionHandler with
+            registry = issuer
+            complianceParty = compliance
+          
+          allocationCid <- exercise handler ExecuteAllocationInstruction with
+            instructionCid = allocationInstruction
+          
+          workflowCid <- create RedemptionWorkflow with
+            redeemer = redeemer
+            issuer = issuer
+            compliance = compliance
+            regulatorParty = regulatorParty
+            assetId = assetId
+            quantity = quantity
+            reason = reason
+            requestedAt = now
+            allocationCid = allocationCid
+            cashPaymentPending = True
+            miningRoundCid = miningRoundCid
+          
+          return (Right workflowCid)
+
+-------------------------------
+-- ✅ NEW: REDEMPTION EFFECT (Consent-Based Batching)
+-------------------------------
+
+template RedemptionEffect
+  with
+    redeemer       : Party
+    issuer         : Party
+    compliance     : Party
+    regulatorParty : Party
+    assetId        : Text
+    quantity       : Decimal
+    reason         : Text
+    holdingCid     : ContractId Holding
+    deadlineHours  : Int
+    miningRoundCid : Optional (ContractId MiningRoundReference)
+    createdAt      : Time
+    effectId       : Text
+  where
+    signatory redeemer  -- ✅ Redeemer signs their own effect
+    observer issuer, compliance
+    
+    ensure quantity > 0.0
+    
+    -- ✅ Issuer processes the effect (has both parties' authority)
+    choice ExecuteRedemptionEffect : ContractId RedemptionWorkflow
+      controller issuer
+      do
+        now <- getTime
+        
+        -- Verify holding ownership
+        holding <- fetch holdingCid
+        let account = getAccount holding
+        assertMsg "Wrong holding owner" (account.owner == redeemer)
+        assertMsg "Insufficient balance" (getAmount_H holding >= quantity)
+        assertMsg "Asset mismatch" ((getInstrument_H holding).id == assetId)
+        
+        -- Create InitiateRedemption with both parties' authority
+        initiator <- create InitiateRedemption with
+          redeemer = redeemer
+          issuer = issuer
+          compliance = compliance
+          regulatorParty = regulatorParty
+          assetId = assetId
+          quantity = quantity
+          reason = reason
+        
+        -- Execute the flow (both parties already have authority)
+        -- Note: This returns Either, we need to unwrap it
+        result <- exercise initiator ExecuteRedemptionFlow with
+          holdingCid = holdingCid
+          deadlineHours = deadlineHours
+          miningRoundCid = miningRoundCid
+          redeemerCurrentSync = "global"  -- Default to global for effect-based
+          targetSync = "global"
+        
+        case result of
+          Right workflowCid -> return workflowCid
+          Left errorMsg -> error errorMsg
+    
+    choice CancelRedemptionEffect : ()
+      controller redeemer
+      do pure ()
+
+-------------------------------
+-- ✅ FIXED: BATCH REDEMPTION (Effect-Based)
+-------------------------------
+
+template BatchRedemptionRequest
+  with
+    issuer         : Party
+    compliance     : Party
+    regulatorParty : Party
+    assetId        : Text
+    redemptions    : [(Party, Decimal, Text)]  -- (redeemer, quantity, reason)
+    requestedAt    : Time
+  where
+    signatory issuer
+    observer compliance, regulatorParty
+    
+    -- ✅ NEW: Process pre-created effects (consent already collected)
+    choice ProcessRedemptionEffects : [ContractId RedemptionWorkflow]
+      with effectCids : [ContractId RedemptionEffect]
+      controller issuer
+      do
+        assertMsg "Effect count must match redemption count" 
+          (length effectCids == length redemptions)
+        
+        -- Verify each effect matches the redemption list
+        effects <- mapA fetch effectCids
+        forA (zip redemptions effects) $ \((redeemer, qty, _), effect) -> do
+          assertMsg "Effect redeemer mismatch" (effect.redeemer == redeemer)
+          assertMsg "Effect quantity mismatch" (effect.quantity == qty)
+          assertMsg "Effect asset mismatch" (effect.assetId == assetId)
+        
+        -- Process all effects
+        forA effectCids $ \effectCid ->
+          exercise effectCid ExecuteRedemptionEffect
+    
+    -- ✅ DEPRECATED: Old direct processing (kept for backward compatibility)
+    -- NOTE: This will fail with authorization errors - use ProcessRedemptionEffects instead
+    choice ProcessBatchRedemptions_DEPRECATED : [ContractId RedemptionWorkflow]
+      with
+        holdingCids     : [ContractId Holding]
+        deadlineHours   : Int
+        miningRoundCid  : Optional (ContractId MiningRoundReference)
+      controller issuer
+      do
+        error "DEPRECATED: Use ProcessRedemptionEffects instead. Redeemers must create RedemptionEffect contracts first."
+
+-------------------------------
+-- Redemption Queue (Updated for Effects)
+-------------------------------
+
+template RedemptionQueue
+  with
+    issuer          : Party
+    assetId         : Text
+    pendingEffects  : [ContractId RedemptionEffect]  -- ✅ Changed from workflows
+    maxBatchSize    : Int
+  where
+    signatory issuer
+    
+    ensure maxBatchSize > 0
+    
+    nonconsuming choice AddToQueue : ContractId RedemptionQueue
+      with effectCid : ContractId RedemptionEffect
+      controller issuer
+      do
+        archive self
+        create this with
+          pendingEffects = pendingEffects ++ [effectCid]
+    
+    choice ProcessQueueBatch : ContractId RedemptionQueue
+      with cashAmounts : [Decimal]
+      controller issuer
+      do
+        let batchSize = min maxBatchSize (length pendingEffects)
+        let (toBatch, remaining) = splitAt batchSize pendingEffects
+        
+        assertMsg "Cash amounts mismatch" (length cashAmounts >= batchSize)
+        
+        -- Execute effects to get workflows
+        workflowCids <- forA toBatch $ \effectCid ->
+          exercise effectCid ExecuteRedemptionEffect
+        
+        -- Complete redemptions with cash payments
+        forA (zip workflowCids cashAmounts) $ \(workflowCid, cashAmount) -> do
+          exercise workflowCid CompleteRedemptionAtomic with
+            cashAmount = cashAmount
+        
+         
+        create this with
+          pendingEffects = remaining
+
+-------------------------------
+-- Helper: zip3Custom (unchanged)
+-------------------------------
+
+zip3Custom : [a] -> [b] -> [c] -> [(a, b, c)]
+zip3Custom [] _ _ = []
+zip3Custom _ [] _ = []
+zip3Custom _ _ [] = []
+zip3Custom (a::restA) (b::restB) (c::restC) = 
+  (a, b, c) :: zip3Custom restA restB restC

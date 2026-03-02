@@ -1,0 +1,416 @@
+-- | Network.SynchronizerMigration - Cross-Synchronizer Contract Migration
+-- ✅ SECTION E.1: Synchronizer Migration Logic
+
+module Network.SynchronizerMigration where
+
+import DA.Time
+import DA.Map qualified as Map
+import TokenStandard.Interfaces
+import Portfolio (Holding_Impl(..))
+
+-------------------------------
+-- ✅ FIXED: Define pipe operator
+-------------------------------
+
+(|>) : a -> (a -> b) -> b
+(|>) x f = f x
+infixl 1 |>
+
+-------------------------------
+-- ✅ E.1: SYNCHRONIZER METADATA
+-------------------------------
+
+data SynchronizerInfo = SynchronizerInfo
+  with
+    synchronizerId   : Text
+    synchronizerUrl  : Text
+    connectedAt      : Time
+    lastVerified     : Time
+  deriving (Eq, Show)
+
+template HoldingSynchronizerMetadata
+  with
+    owner            : Party
+    issuer           : Party
+    assetId          : Text
+    holdingCid       : ContractId Holding
+    synchronizerInfo : SynchronizerInfo
+    canMigrate       : Bool
+  where
+    signatory issuer
+    observer owner
+    
+    nonconsuming choice GetSynchronizerInfo : SynchronizerInfo
+      controller issuer, owner
+      do
+        return synchronizerInfo
+    
+    choice UpdateAfterMigration : ContractId HoldingSynchronizerMetadata
+      with
+        newSynchronizerInfo : SynchronizerInfo
+      controller issuer
+      do
+        assertMsg "Migration not allowed" canMigrate
+        create this with
+          synchronizerInfo = newSynchronizerInfo
+
+-------------------------------
+-- ✅ E.1: SYNCHRONIZER COMPATIBILITY CHECK
+-------------------------------
+
+template SynchronizerCompatibilityCheck
+  with
+    checker          : Party
+    contracts        : [(ContractId Holding, Text)]
+    settlementId     : Text
+    requiredSync     : Text
+  where
+    signatory checker
+    
+    nonconsuming choice CheckCompatibility : CompatibilityResult
+      controller checker
+      do
+        let incompatible = filter (\(_, sync) -> sync /= requiredSync) contracts
+        
+        if null incompatible then
+          return CompatibilityResult with
+            compatible = True
+            incompatibleContracts = []
+            recommendedAction = None
+        else
+          return CompatibilityResult with
+            compatible = False
+            incompatibleContracts = map fst incompatible
+            recommendedAction = Some ("Migrate " <> show (length incompatible) <> " contracts to " <> requiredSync)
+
+data CompatibilityResult = CompatibilityResult
+  with
+    compatible            : Bool
+    incompatibleContracts : [ContractId Holding]
+    recommendedAction     : Optional Text
+  deriving (Eq, Show)
+
+-------------------------------
+-- ✅ E.1: MIGRATION REQUEST
+-------------------------------
+
+template SynchronizerMigrationRequest
+  with
+    requester        : Party
+    issuer           : Party
+    holdingCid       : ContractId Holding
+    currentSync      : Text
+    targetSync       : Text
+    reason           : Text
+    requestedAt      : Time
+    deadline         : Time
+  where
+    signatory requester
+    observer issuer
+    
+    ensure currentSync /= targetSync
+    
+    choice ApproveMigration : ContractId MigrationWorkflow
+      controller issuer
+      do
+        now <- getTime
+        assertMsg "Migration deadline passed" (now <= deadline)
+        
+        create MigrationWorkflow with
+          requester = requester
+          issuer = issuer
+          holdingCid = holdingCid
+          currentSync = currentSync
+          targetSync = targetSync
+          reason = reason
+          status = MigrationPending
+          initiatedAt = now
+    
+    choice RejectMigration : ()
+      with
+        rejectionReason : Text
+      controller issuer
+      do
+        pure ()
+
+-------------------------------
+-- ✅ E.1: MIGRATION WORKFLOW
+-------------------------------
+
+data MigrationStatus
+  = MigrationPending
+  | MigrationInProgress
+  | MigrationCompleted
+  | MigrationFailed
+  deriving (Eq, Show)
+
+template MigrationWorkflow
+  with
+    requester   : Party
+    issuer      : Party
+    holdingCid  : ContractId Holding
+    currentSync : Text
+    targetSync  : Text
+    reason      : Text
+    status      : MigrationStatus
+    initiatedAt : Time
+  where
+    signatory issuer, requester
+    
+    choice LockForMigration : (ContractId Holding, ContractId MigrationWorkflow)
+      controller issuer
+      do
+        assertMsg "Migration must be pending" (status == MigrationPending)
+        
+        holding <- fetch holdingCid
+        assertMsg "Holding is already locked" (not (isLocked holding))
+        
+        archive holdingCid
+        
+        lockedHolding <- create Holding_Impl with
+          owner = getAccount holding |> (.owner)
+          assetId = (getInstrument_H holding).id
+          quantity = getAmount_H holding
+          issuer = issuer
+          compliance = issuer
+          locked = True
+          lockContext = Some ("Migration to " <> targetSync)
+          metadata = addMetadata "migration-in-progress" "true" (Map.empty)
+          observers = []
+        
+      
+        newWorkflow <- create this with
+          status = MigrationInProgress
+          holdingCid = toInterfaceContractId lockedHolding
+        
+        return (toInterfaceContractId lockedHolding, newWorkflow)
+    
+    choice CompleteMigration : (ContractId Holding, ContractId HoldingSynchronizerMetadata)
+      with
+        migrationProof : Text
+      controller issuer
+      do
+        assertMsg "Migration must be in progress" (status == MigrationInProgress)
+        
+        now <- getTime
+        
+        holding <- fetch holdingCid
+        assertMsg "Holding must be locked" (isLocked holding)
+        
+        archive holdingCid
+        
+        newHolding <- create Holding_Impl with
+          owner = getAccount holding |> (.owner)
+          assetId = (getInstrument_H holding).id
+          quantity = getAmount_H holding
+          issuer = issuer
+          compliance = issuer
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("migrated-from", currentSync)
+            , ("migrated-to", targetSync)
+            , ("migration-proof", migrationProof)
+            , ("migration-completed-at", show now)
+            ]
+          observers = []
+        
+        syncMeta <- create HoldingSynchronizerMetadata with
+          owner = getAccount holding |> (.owner)
+          issuer = issuer
+          assetId = (getInstrument_H holding).id
+          holdingCid = toInterfaceContractId newHolding
+          synchronizerInfo = SynchronizerInfo with
+            synchronizerId = targetSync
+            synchronizerUrl = getSyncUrl targetSync
+            connectedAt = now
+            lastVerified = now
+          canMigrate = True
+        
+        
+        _ <- create this with status = MigrationCompleted
+        
+        return (toInterfaceContractId newHolding, syncMeta)
+    
+    choice FailMigration : ContractId Holding
+      with
+        failureReason : Text
+      controller issuer
+      do
+        assertMsg "Migration must be in progress" (status == MigrationInProgress)
+        
+        holding <- fetch holdingCid
+        
+        archive holdingCid
+        
+        restoredHolding <- create Holding_Impl with
+          owner = getAccount holding |> (.owner)
+          assetId = (getInstrument_H holding).id
+          quantity = getAmount_H holding
+          issuer = issuer
+          compliance = issuer
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("migration-failed", "true")
+            , ("failure-reason", failureReason)
+            ]
+          observers = []
+        
+        
+        _ <- create this with status = MigrationFailed
+        
+        return (toInterfaceContractId restoredHolding)
+
+-------------------------------
+-- ✅ E.1: PRE-SETTLEMENT MIGRATION COORDINATOR
+-------------------------------
+
+template PreSettlementMigrationCoordinator
+  with
+    coordinator      : Party
+    settlementId     : Text
+    targetSync       : Text
+    buyerHoldings    : [ContractId Holding]
+    sellerHoldings   : [ContractId Holding]
+    deadline         : Time
+  where
+    signatory coordinator
+    
+    nonconsuming choice CheckMigrationNeeded : MigrationPlan
+      with
+        holdingSyncMeta : [(ContractId Holding, Text)]
+      controller coordinator
+      do
+        let needMigration = filter (\(_, sync) -> sync /= targetSync) holdingSyncMeta
+        
+        if null needMigration then
+          return MigrationPlan with
+            migrationRequired = False
+            holdingsToMigrate = []
+            estimatedTime = 0
+        else
+          return MigrationPlan with
+            migrationRequired = True
+            holdingsToMigrate = map fst needMigration
+            estimatedTime = length needMigration * 30
+    
+    choice InitiateBatchMigration : [ContractId SynchronizerMigrationRequest]
+      with
+        holdingSyncInfo : [(ContractId Holding, Text)]
+      controller coordinator
+      do
+        now <- getTime
+        
+        forA (filter (\(_, sync) -> sync /= targetSync) holdingSyncInfo) $ 
+          \(holdingCid, currentSync) -> do
+            holding <- fetch holdingCid
+            
+            create SynchronizerMigrationRequest with
+              requester = coordinator
+              issuer = (getInstrument_H holding).issuer
+              holdingCid = holdingCid
+              currentSync = currentSync
+              targetSync = targetSync
+              reason = "Pre-settlement migration for " <> settlementId
+              requestedAt = now
+              deadline = deadline
+
+data MigrationPlan = MigrationPlan
+  with
+    migrationRequired : Bool
+    holdingsToMigrate : [ContractId Holding]
+    estimatedTime     : Int
+  deriving (Eq, Show)
+
+-------------------------------
+-- ✅ E.1: HELPER FUNCTIONS
+-------------------------------
+
+getSyncUrl : Text -> Text
+getSyncUrl syncId = case syncId of
+  "global" -> "https://global.canton.network"
+  "private-sync-1" -> "https://private1.example.com"
+  _ -> "https://" <> syncId <> ".canton.network"
+
+-------------------------------
+-- ✅ E.1: INTEGRATION WITH DVP SETTLEMENT
+-------------------------------
+
+template DVPSettlementWithMigration
+  with
+    settlementId     : Text
+    settlementApp    : Party
+    buyer            : Party
+    seller           : Party
+    buyerHoldingCid  : ContractId Holding
+    sellerHoldingCid : ContractId Holding
+    deadline         : Time
+    targetSync       : Text
+  where
+    signatory settlementApp
+    observer buyer, seller
+    
+    choice PrepareForSettlement : PreparationResult
+      with
+        buyerCurrentSync  : Text
+        sellerCurrentSync : Text
+      controller settlementApp
+      do
+        now <- getTime
+        assertMsg "Settlement deadline passed" (now <= deadline)
+        
+        let buyerNeedsMigration = buyerCurrentSync /= targetSync
+        let sellerNeedsMigration = sellerCurrentSync /= targetSync
+        
+        if not buyerNeedsMigration && not sellerNeedsMigration then
+          return PreparationResult with
+            ready = True
+            buyerMigrationCid = None
+            sellerMigrationCid = None
+            estimatedWaitTime = 0
+        else do
+          buyerMigReq <- if buyerNeedsMigration then do
+            req <- create SynchronizerMigrationRequest with
+              requester = buyer
+              issuer = settlementApp
+              holdingCid = buyerHoldingCid
+              currentSync = buyerCurrentSync
+              targetSync = targetSync
+              reason = "Pre-settlement migration"
+              requestedAt = now
+              deadline = deadline
+            return (Some req)
+          else
+            return None
+          
+          sellerMigReq <- if sellerNeedsMigration then do
+            req <- create SynchronizerMigrationRequest with
+              requester = seller
+              issuer = settlementApp
+              holdingCid = sellerHoldingCid
+              currentSync = sellerCurrentSync
+              targetSync = targetSync
+              reason = "Pre-settlement migration"
+              requestedAt = now
+              deadline = deadline
+            return (Some req)
+          else
+            return None
+          
+          let waitTime = (if buyerNeedsMigration then 30 else 0) + 
+                        (if sellerNeedsMigration then 30 else 0)
+          
+          return PreparationResult with
+            ready = False
+            buyerMigrationCid = buyerMigReq
+            sellerMigrationCid = sellerMigReq
+            estimatedWaitTime = waitTime
+
+data PreparationResult = PreparationResult
+  with
+    ready              : Bool
+    buyerMigrationCid  : Optional (ContractId SynchronizerMigrationRequest)
+    sellerMigrationCid : Optional (ContractId SynchronizerMigrationRequest)
+    estimatedWaitTime  : Int
+  deriving (Eq, Show)

@@ -1,0 +1,57 @@
+-- | Compliance.Vouchers - KYC Approval Vouchers (Extracted to break circular dependency)
+-- ✅ SECTION A.2: Compliance moved to Observer
+-- ✅ Nonconsuming VerifyKYC for concurrent transfers
+
+module Compliance.Vouchers where
+
+import DA.Time
+
+-------------------------------
+-- COMPLIANCE APPROVAL VOUCHER
+-- Extracted from Trade.daml to prevent circular dependency:
+-- Trade → FOP_Transfers → (was importing Trade for voucher)
+-------------------------------
+
+template ComplianceApprovalVoucher
+  with
+    compliance      : Party
+    approvedParty   : Party
+    assetId         : Text
+    maxAmount       : Decimal
+    expiresAt       : Time
+    approvalReason  : Text
+    restrictions    : [Text]
+  where
+    signatory compliance
+    observer approvedParty
+    
+    ensure maxAmount > 0.0
+
+    -- ✅ ADDED: Nonconsuming verification — does not consume voucher, safe for concurrent trades
+    nonconsuming choice VerifyKYC : ()
+      with
+        tradeAmount : Decimal
+        tradingParty : Party
+      controller compliance
+      do
+        now <- getTime
+        assertMsg "Voucher expired" (now <= expiresAt)
+        assertMsg "Trade amount exceeds approved limit" (tradeAmount <= maxAmount)
+        assertMsg "Voucher is not for this party" (tradingParty == approvedParty)
+        pure ()
+    
+    choice ConsumeVoucher : ()
+      with
+        tradeAmount : Decimal
+        tradeCid    : Text  -- Changed from ContractId to Text to avoid circular dependency
+      controller approvedParty
+      do
+        now <- getTime
+        assertMsg "Voucher expired" (now <= expiresAt)
+        assertMsg "Trade amount exceeds approved limit" (tradeAmount <= maxAmount)
+        pure ()
+    
+    choice RevokeVoucher : ()
+      with revocationReason : Text
+      controller compliance
+      do pure ()

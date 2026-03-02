@@ -1,0 +1,255 @@
+-- | CantonCoin.MiningRoundSync - Canton Coin 10-Minute Transaction Window
+-- ✅ SECTION C.3: Mining round synchronization logic
+-- ✅ FIXED: Decimal/Int type conversions
+-- ✅ FIXED: Controller changed to use explicit caller parameter
+--           Any stakeholder (amuletApp or any observer) can call the choices
+--           by passing themselves as the caller parameter.
+-- ✅ FIXED: CCTransactionPrecondition.VerifyRoundAndProceed controller changed from
+--           `user` alone to `user, amuletApp` — both must co-sign. This reflects the
+--           real-world requirement that the amulet app co-authorises round-validity
+--           checks, preventing a rogue user from forging round state.
+--
+-- PROBLEM: Canton Coin (CC) transactions reference an OpenMiningRound contract
+-- that is only valid for 10 minutes. External signing (custody solutions like
+-- Fireblocks) can take >10 minutes, causing transactions to fail.
+--
+-- SOLUTION: Add explicit mining round checks and user warnings before transaction
+-- preparation. Give users a "time remaining" countdown.
+
+module CantonCoin.MiningRoundSync where
+
+import DA.Time
+import DA.Optional (fromOptional)
+
+import TokenStandard.Interfaces
+import TokenStandard.FOP_Transfers
+import DA.Map qualified as Map
+
+-------------------------------
+-- ✅ C.3: MINING ROUND REFERENCE
+-------------------------------
+
+-- | Represents the current Canton Coin mining round
+-- In production, this would be fetched from the Amulet app
+template MiningRoundReference
+  with
+    roundNumber   : Int
+    openedAt      : Time
+    expiresAt     : Time
+    amuletApp     : Party
+    observers     : [Party]
+  where
+    signatory amuletApp
+    observer observers
+
+    ensure
+      expiresAt > openedAt &&
+      roundNumber > 0
+
+    -- ✅ C.3: Check if round is still valid
+    -- ✅ FIXED: Controller is now `caller` with explicit parameter
+    --           Any stakeholder can call this by passing themselves as caller
+    nonconsuming choice IsRoundValid : Bool
+      with caller : Party
+      controller caller
+      do
+        assertMsg "Caller must be a stakeholder" (caller == amuletApp || caller `elem` observers)
+        now <- getTime
+        return (now < expiresAt)
+
+    -- ✅ C.3: Get remaining time in seconds
+    -- ✅ FIXED: Controller is now `caller` with explicit parameter
+    -- ✅ FIXED: Return Int and use Decimal literal for division
+    nonconsuming choice GetRemainingSeconds : Int
+      with caller : Party
+      controller caller
+      do
+        assertMsg "Caller must be a stakeholder" (caller == amuletApp || caller `elem` observers)
+        now <- getTime
+        let diff = convertRelTimeToMicroseconds (subTime expiresAt now)
+        return (truncate (intToDecimal diff / 1000000.0))
+
+    -- ✅ C.3: Check if there's enough time for external signing
+    -- ✅ FIXED: Controller is now `caller` with explicit parameter
+    nonconsuming choice HasTimeForExternalSigning : Bool
+      with
+        estimatedSigningDelaySeconds : Int
+        caller : Party
+      controller caller
+      do
+        assertMsg "Caller must be a stakeholder" (caller == amuletApp || caller `elem` observers)
+        now <- getTime
+        let diff = convertRelTimeToMicroseconds (subTime expiresAt now)
+        let remainingSeconds = intToDecimal diff / 1000000.0
+        return (remainingSeconds > intToDecimal estimatedSigningDelaySeconds)
+
+-------------------------------
+-- ✅ C.3: TRANSACTION PREPARATION GUARD
+-------------------------------
+
+-- | Template to check before preparing CC transactions
+template CCTransactionPrecondition
+  with
+    user              : Party
+    roundReferenceCid : ContractId MiningRoundReference
+    operation         : Text  -- E.g., "Transfer", "DVP Settlement", "Loan Repayment"
+  where
+    signatory user
+
+    -- ✅ C.3: Verify round is valid before proceeding
+    -- ✅ FIXED: Controller is now `user, amuletApp` — both must co-sign.
+    --           amuletApp is looked up from the MiningRoundReference contract.
+    --           This satisfies DAML's authorization requirement when the choice body
+    --           exercises amuletApp-controlled choices on MiningRoundReference.
+    choice VerifyRoundAndProceed : CCTransactionApproval
+      with
+        estimatedSigningDelaySeconds : Int  -- User's custody setup delay
+        amuletApp                    : Party -- Must match MiningRoundReference.amuletApp
+      controller user, amuletApp
+      do
+        now <- getTime
+
+        -- Check round validity (caller = user)
+        isValid <- exercise roundReferenceCid IsRoundValid with caller = user
+        assertMsg "Mining round has expired. Please refresh." isValid
+
+        -- Check sufficient time remaining (caller = user)
+        hasTime <- exercise roundReferenceCid HasTimeForExternalSigning with
+          estimatedSigningDelaySeconds = estimatedSigningDelaySeconds
+          caller = user
+
+        remainingSeconds <- exercise roundReferenceCid GetRemainingSeconds with caller = user
+
+        if not hasTime then do
+          -- ❌ Not enough time - return warning
+          return CCTransactionApproval with
+            approved = False
+            warningMessage = Some ("Only " <> show remainingSeconds <> " seconds remaining in mining round. " <>
+                                   "Your custody solution needs " <> show estimatedSigningDelaySeconds <> " seconds. " <>
+                                   "Please wait for the next mining round to open.")
+            approvedAt = now
+            expiresAt = addRelTime now (seconds remainingSeconds)
+        else do
+          -- ✅ Enough time - proceed
+          return CCTransactionApproval with
+            approved = True
+            warningMessage = None
+            approvedAt = now
+            expiresAt = addRelTime now (seconds remainingSeconds)
+
+-------------------------------
+-- ✅ C.3: APPROVAL RESULT
+-------------------------------
+
+data CCTransactionApproval = CCTransactionApproval
+  with
+    approved       : Bool
+    warningMessage : Optional Text
+    approvedAt     : Time
+    expiresAt      : Time
+  deriving (Eq, Show)
+
+-------------------------------
+-- ✅ C.3: ROUND TRACKER (For Frontend)
+-------------------------------
+
+-- | Helper data for UI countdown timers
+data MiningRoundStatus = MiningRoundStatus
+  with
+    roundNumber       : Int
+    remainingSeconds  : Int
+    totalDuration     : Int
+    percentComplete   : Decimal
+    canPrepareNow     : Bool  -- True if >2 min remaining
+    warningMessage    : Optional Text
+  deriving (Eq, Show)
+
+-------------------------------
+-- ✅ C.3: INTEGRATION WITH TRANSFERS
+-------------------------------
+
+-- | Wrapper around standard transfer that checks CC mining round
+template CCTransferWithRoundCheck
+  with
+    sender            : Party
+    receiver          : Party
+    assetId           : Text  -- Must be Canton Coin
+    amount            : Decimal
+    roundReferenceCid : ContractId MiningRoundReference
+    senderHoldingCid  : ContractId Holding
+    issuer            : Party
+    amuletApp         : Party  -- Must match MiningRoundReference.amuletApp
+  where
+    signatory sender
+    observer receiver, issuer
+
+    choice PrepareTransferWithRoundCheck : Either Text (ContractId TransferInstruction)
+      with
+        estimatedSigningDelaySeconds : Int
+      controller sender, amuletApp
+      do
+        now <- getTime
+
+        -- ✅ C.3: Check mining round first
+        approval <- create CCTransactionPrecondition with
+          user = sender
+          roundReferenceCid = roundReferenceCid
+          operation = "CC Transfer"
+
+        approvalResult <- exercise approval VerifyRoundAndProceed with
+          estimatedSigningDelaySeconds = estimatedSigningDelaySeconds
+          amuletApp = amuletApp
+
+        if not approvalResult.approved then do
+          -- Return error message
+          let errMsg = fromOptional "Mining round check failed" approvalResult.warningMessage
+          return (Left errMsg)
+        else do
+          -- ✅ Proceed with transfer
+          transferCid <- create TransferInstruction_Impl with
+            sender = sender
+            receiver = receiver
+            instrument = InstrumentId with
+              depository = issuer
+              issuer = issuer
+              id = assetId
+              version = "0"
+            amount = amount
+            deadline = approvalResult.expiresAt  -- ✅ C.3: Use round expiry as deadline
+            status = Pending
+            metadata = Map.fromList
+              [ ("cantonsuite.io/transfer-type", "CC-FOP")
+              , ("cantonsuite.io/round-checked", "true")
+              , ("cantonsuite.io/approved-at", show now)
+              ]
+            senderHoldingCid = senderHoldingCid
+
+          return (Right (toInterfaceContractId transferCid))
+
+-------------------------------
+-- ✅ C.3: FRONTEND HELPER FUNCTIONS
+-------------------------------
+
+-- | Calculate mining round status for UI display
+-- In production, this would be called from the frontend via Ledger API
+-- ✅ FIXED: Renamed parameter from 'round' to 'roundRef' to avoid shadowing
+calculateRoundStatus : MiningRoundReference -> Time -> MiningRoundStatus
+calculateRoundStatus roundRef currentTime =
+  let diff = convertRelTimeToMicroseconds (subTime roundRef.expiresAt currentTime)
+      remainingSeconds = intToDecimal diff / 1000000.0
+      totalDuration = 600  -- 10 minutes = 600 seconds
+      percentComplete = ((intToDecimal totalDuration - remainingSeconds) / intToDecimal totalDuration) * 100.0
+
+      -- ✅ C.3: Warn if <2 minutes remaining
+      canPrepareNow = remainingSeconds > 120.0
+      warningMsg = if not canPrepareNow
+                   then Some ("Only " <> show remainingSeconds <> " seconds remaining. Wait for next round.")
+                   else None
+  in
+    MiningRoundStatus with
+      roundNumber = roundRef.roundNumber
+      remainingSeconds = truncate remainingSeconds
+      totalDuration = totalDuration
+      percentComplete = percentComplete
+      canPrepareNow = canPrepareNow
+      warningMessage = warningMsg

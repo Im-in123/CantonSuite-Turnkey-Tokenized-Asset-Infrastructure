@@ -1,0 +1,319 @@
+-- | Distribution - Dividend and yield distribution (REFACTORED FOR SECTION D.2)
+-- ✅ SECTION D.2: Dividend "Pull" Model (Claim-Based)
+-- ✅ FIXED: ClaimDividend is truly nonconsuming — no archive self, zero write-write contention.
+--           Double-claim prevention uses a separate DividendClaimRecord keyed by (announcementId, holder).
+-- ✅ FIXED: DividendAnnouncement now has an `eligibleHolders : [Party]` field.
+--           DAML requires choice controllers to be stakeholders on the contract.
+--           Previously `controller holder` where `holder` was a choice arg (not a stakeholder)
+--           caused "contract not visible to reading parties" — Alice was not in the observer set.
+--           `eligibleHolders` are added as `observer eligibleHolders` so any eligible holder
+--           can exercise ClaimDividend. The issuer populates this from the snapshot off-ledger.
+--
+-- ORIGINAL BUG 1: ClaimDividend did `archive self` then `create this with claimedSoFar = ...`
+-- This made it CONSUMING, causing O(N) write-write contention defeating the Pull model's purpose.
+-- ORIGINAL BUG 2: `controller holder` where holder is a choice argument, not a stakeholder.
+-- DAML rejects this: "contract not visible to reading parties".
+
+module Distribution.ClaimBased where
+
+import DA.Text (sha256)
+import DA.Time
+import DA.Map qualified as Map
+import Portfolio (Holding_Impl(..))
+import TokenStandard.Interfaces
+
+-------------------------------
+-- ✅ D.2: DIVIDEND ANNOUNCEMENT (Pull Model)
+-------------------------------
+
+template DividendAnnouncement
+  with
+    issuer               : Party
+    compliance           : Party
+    regulator            : Party
+    assetId              : Text
+    dividendLabel        : Text
+    perUnitAmount        : Decimal
+    snapshotTime         : Time
+    expirationTime       : Time
+    totalUnitsAtSnapshot : Decimal
+    totalDividendPool    : Decimal
+    announcementId       : Text
+    -- ✅ FIXED: eligibleHolders are observers so they can exercise ClaimDividend.
+    --           DAML's authorization model requires a choice's controller to be a
+    --           stakeholder (signatory or observer) on the contract being exercised.
+    --           Without this, any holder trying to call ClaimDividend gets:
+    --           "contract not visible to reading parties".
+    --           The issuer populates this list from the holding snapshot off-ledger
+    --           before publishing the announcement. In production, this is the full
+    --           list of token holders at snapshotTime.
+    eligibleHolders      : [Party]
+  where
+    signatory issuer
+    observer compliance, regulator, eligibleHolders
+
+    ensure
+      perUnitAmount > 0.0 &&
+      totalUnitsAtSnapshot > 0.0 &&
+      totalDividendPool == perUnitAmount * totalUnitsAtSnapshot &&
+      expirationTime > snapshotTime &&
+      announcementId /= ""
+
+    -- ✅ Truly nonconsuming. All N holders can claim in parallel with zero contention.
+    -- Double-claim prevention: DividendClaimRecord key (announcementId, holder)
+    -- makes a second claim by the same holder an atomic duplicate-key failure.
+    nonconsuming choice ClaimDividend : (ContractId DividendClaim, ContractId DividendClaimRecord)
+      with
+        holder           : Party
+        holdingSnapshot  : Decimal
+        proofOfOwnership : Text
+      -- ✅ FIXED: controller is `holder` — valid because holder is in eligibleHolders,
+      --           which is in the observer set, making holder a stakeholder.
+      controller holder
+      do
+        now <- getTime
+        assertMsg "Dividend claim window has expired" (now <= expirationTime)
+        assertMsg "Snapshot balance must be positive"  (holdingSnapshot > 0.0)
+        assertMsg "Holder is not in eligible holders list" (holder `elem` eligibleHolders)
+
+        let holderShare = perUnitAmount * holdingSnapshot
+
+        -- ✅ DividendClaimRecord key = (announcementId, holder)
+        -- Second claim by same holder → duplicate key → atomic failure
+        claimRecord <- create DividendClaimRecord with
+          announcementId   = announcementId
+          holder           = holder
+          issuer           = issuer
+          assetId          = assetId
+          dividendLabel    = dividendLabel
+          holdingSnapshot  = holdingSnapshot
+          holderShare      = holderShare
+          proofOfOwnership = proofOfOwnership
+          claimedAt        = now
+
+        claimCid <- create DividendClaim with
+          issuer           = issuer
+          holder           = holder
+          assetId          = assetId
+          dividendLabel    = dividendLabel
+          amount           = holderShare
+          holdingSnapshot  = holdingSnapshot
+          claimedAt        = now
+          proofOfOwnership = proofOfOwnership
+          announcementId   = announcementId
+
+        return (claimCid, claimRecord)
+
+    choice CloseAnnouncement : ()
+      controller issuer
+      do
+        now <- getTime
+        assertMsg "Cannot close before expiration" (now > expirationTime)
+        pure ()
+
+    nonconsuming choice GetAnnouncementInfo : DividendAnnouncementInfo
+      controller issuer, compliance, regulator
+      do
+        now <- getTime
+        return DividendAnnouncementInfo with
+          assetId           = assetId
+          dividendLabel     = dividendLabel
+          perUnitAmount     = perUnitAmount
+          snapshotTime      = snapshotTime
+          expirationTime    = expirationTime
+          totalDividendPool = totalDividendPool
+          isExpired         = now > expirationTime
+
+data DividendAnnouncementInfo = DividendAnnouncementInfo
+  with
+    assetId           : Text
+    dividendLabel     : Text
+    perUnitAmount     : Decimal
+    snapshotTime      : Time
+    expirationTime    : Time
+    totalDividendPool : Decimal
+    isExpired         : Bool
+  deriving (Eq, Show)
+
+-------------------------------
+-- ✅ DOUBLE-CLAIM PREVENTION RECORD
+-- Key: (announcementId, holder). DAML enforces uniqueness per key globally.
+-- A second ClaimDividend by the same holder for the same announcement fails atomically.
+-- ✅ FIXED: `holder` must be a signatory (not just observer) because DAML requires all
+--           key maintainers to also be signatories on the contract.
+--           Previously `signatory issuer; observer holder` with `maintainer key._2` (holder)
+--           caused: "some parties are maintainers but not signatories: 'Alice'".
+--           Fix: `signatory issuer, holder` — holder co-signs their own claim record,
+--           which is correct semantically (Alice should authorise her own claim).
+--           The create is called from inside ClaimDividend which Alice controls, so
+--           Alice's authority is already present in the transaction.
+-------------------------------
+
+template DividendClaimRecord
+  with
+    announcementId   : Text
+    holder           : Party
+    issuer           : Party
+    assetId          : Text
+    dividendLabel    : Text
+    holdingSnapshot  : Decimal
+    holderShare      : Decimal
+    proofOfOwnership : Text
+    claimedAt        : Time
+  where
+    signatory issuer, holder   -- ✅ FIXED: holder must be signatory to be a key maintainer
+
+    ensure holderShare > 0.0
+
+    key (announcementId, holder) : (Text, Party)
+    maintainer key._2
+
+-------------------------------
+-- ✅ D.2: DIVIDEND CLAIM CONTRACT
+-------------------------------
+
+template DividendClaim
+  with
+    issuer           : Party
+    holder           : Party
+    assetId          : Text
+    dividendLabel    : Text
+    amount           : Decimal
+    holdingSnapshot  : Decimal
+    claimedAt        : Time
+    proofOfOwnership : Text
+    announcementId   : Text
+  where
+    signatory issuer, holder
+
+    ensure amount > 0.0
+
+    choice RedeemClaim : ContractId Holding
+      controller holder
+      do
+        holding <- create Holding_Impl with
+          owner       = holder
+          assetId     = "USD"
+          quantity    = amount
+          issuer      = issuer
+          compliance  = issuer
+          locked      = False
+          lockContext = None
+          metadata    = Map.fromList
+            [ ("dividend-asset",    assetId)
+            , ("dividend-label",    dividendLabel)
+            , ("units-at-snapshot", show holdingSnapshot)
+            , ("claimed-at",        show claimedAt)
+            , ("announcement-id",   announcementId)
+            ]
+          observers   = []
+        return (toInterfaceContractId holding)
+
+-------------------------------
+-- ✅ D.2: SNAPSHOT HELPER TEMPLATE
+-------------------------------
+
+template HoldingSnapshot
+  with
+    issuer       : Party
+    assetId      : Text
+    snapshotTime : Time
+    holder       : Party
+    quantity     : Decimal
+    holdingHash  : Text
+  where
+    signatory issuer
+    observer holder
+
+    ensure quantity > 0.0
+
+    choice CreateSnapshot : ContractId HoldingSnapshot
+      with holdingCid : ContractId Holding
+      controller holder
+      do
+        now     <- getTime
+        holding <- fetch holdingCid
+        create HoldingSnapshot with
+          issuer       = issuer
+          assetId      = assetId
+          snapshotTime = now
+          holder       = holder
+          quantity     = getAmount_H holding
+          holdingHash  = sha256 (show holdingCid <> show now)
+
+-------------------------------
+-- ✅ D.2: PRIVACY-PRESERVING REGULATOR VIEW
+-------------------------------
+
+template DividendRegulatorView
+  with
+    regulator      : Party
+    issuer         : Party
+    assetId        : Text
+    dividendLabel  : Text
+    totalAmount    : Decimal
+    recipientHash  : Text
+    distributedAt  : Time
+    claimExpiresAt : Time
+  where
+    signatory issuer
+    observer regulator
+
+    ensure totalAmount > 0.0
+
+-------------------------------
+-- ✅ D.2: ISSUER WORKFLOW TEMPLATE
+-------------------------------
+
+template DividendAnnouncementWorkflow
+  with
+    issuer         : Party
+    compliance     : Party
+    regulator      : Party
+    assetId        : Text
+    dividendLabel  : Text
+    perUnitAmount  : Decimal
+    expirationDays : Int
+  where
+    signatory issuer
+    observer compliance
+
+    choice CreateAnnouncement : ContractId DividendAnnouncement
+      with
+        totalUnitsOutstanding : Decimal
+        uniqueAnnouncementId  : Text
+        -- ✅ FIXED: Workflow now accepts the eligible holders list so the
+        --           announcement can be created with the correct observer set.
+        --           In production, compliance passes the snapshot holder list here.
+        holdersAtSnapshot     : [Party]
+      controller compliance
+      do
+        now <- getTime
+        let expirationTime    = addRelTime now (days expirationDays)
+        let totalDividendPool = perUnitAmount * totalUnitsOutstanding
+
+        announcementCid <- create DividendAnnouncement with
+          issuer               = issuer
+          compliance           = compliance
+          regulator            = regulator
+          assetId              = assetId
+          dividendLabel        = dividendLabel
+          perUnitAmount        = perUnitAmount
+          snapshotTime         = now
+          expirationTime       = expirationTime
+          totalUnitsAtSnapshot = totalUnitsOutstanding
+          totalDividendPool    = totalDividendPool
+          announcementId       = uniqueAnnouncementId
+          eligibleHolders      = holdersAtSnapshot
+
+        _ <- create DividendRegulatorView with
+          regulator      = regulator
+          issuer         = issuer
+          assetId        = assetId
+          dividendLabel  = dividendLabel
+          totalAmount    = totalDividendPool
+          recipientHash  = sha256 ("ANNOUNCEMENT-" <> dividendLabel)
+          distributedAt  = now
+          claimExpiresAt = expirationTime
+
+        return announcementCid

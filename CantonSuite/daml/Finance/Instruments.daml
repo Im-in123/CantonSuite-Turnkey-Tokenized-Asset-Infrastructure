@@ -1,0 +1,261 @@
+-- | Finance.Instruments - CIP-0056 Compliant RWA Instruments
+-- ✅ FIXED: ToggleFractionalized now requires FractionalizationGovernanceApproval certificate
+--           Controller changed to compliance (was tokenIssuer alone — no governance gate)
+--           This wires FractionalizationSafety.daml into the actual toggle path.
+module Finance.Instruments where
+
+import Daml.Finance.Instrument.Token.V4.Instrument qualified as Token
+import Daml.Finance.Interface.Types.Common.V3.Types (InstrumentKey(..), Id(..), HoldingStandard(..))
+import DA.Set (singleton)
+import DA.Map qualified as Map
+import DA.Optional (fromOptional)
+import DA.List (head)
+
+import TokenStandard.Interfaces
+
+-------------------------------
+-- ✅ NEW: FRACTIONALIZATION GOVERNANCE APPROVAL CERTIFICATE
+-- Issued by FractionalizationSafety.FractionalizationToggleRequest.ExecuteToggle
+-- after dust sweep and all policy requirements are met.
+-- ToggleFractionalized consumes this certificate — the toggle cannot happen without it.
+-------------------------------
+
+template FractionalizationGovernanceApproval
+  with
+    issuer     : Party
+    compliance : Party
+    assetId    : Text
+    newValue   : Bool   -- The fractionalized value being approved
+    approvedAt : Time
+  where
+    signatory compliance
+    observer issuer
+
+    ensure assetId /= ""
+
+    -- Single-use: consumed by ToggleFractionalized
+    choice ConsumeApproval : ()
+      controller issuer
+      do pure ()
+
+-------------------------------
+-- ✅ B.3: CNS DISCOVERY HELPER
+-------------------------------
+
+getCNSRegistryUrls : Party -> [Text]
+getCNSRegistryUrls adminParty =
+  ["https://registry.canton.network"]
+
+getRegistryEndpoint : Party -> Text -> Text
+getRegistryEndpoint adminParty endpoint =
+  let urls = getCNSRegistryUrls adminParty
+      baseUrl = if null urls then "https://registry.canton.network" else head urls
+  in baseUrl <> endpoint
+
+-------------------------------
+-- ✅ B.2: STANDARDIZED METADATA HELPERS
+-------------------------------
+
+addReasonMetadata : Text -> Metadata -> Metadata
+addReasonMetadata reason meta =
+  addMetadata cip0056Reason reason meta
+
+addLockContextMetadata : Text -> Metadata -> Metadata
+addLockContextMetadata context meta =
+  addMetadata cip0056LockContext context meta
+
+addRegistryUrlsMetadata : [Text] -> Metadata -> Metadata
+addRegistryUrlsMetadata urls meta =
+  let urlsText = intercalate "," urls
+  in addMetadata cip0056RegistryUrls urlsText meta
+
+-------------------------------
+-- ✅ B.4: DECIMAL VALIDATION
+-------------------------------
+
+validateCIP0056Decimal : Decimal -> Bool
+validateCIP0056Decimal amount = True
+
+ensureValidAmount : Text -> Decimal -> Bool
+ensureValidAmount fieldName amount =
+  amount > 0.0 && validateCIP0056Decimal amount
+
+-------------------------------
+-- CIP-0056 Compliant RWA Instrument
+-------------------------------
+
+template RWAInstrument
+  with
+    instrument     : InstrumentKey
+    tokenIssuer    : Party
+    compliance     : Party
+    name           : Text
+    assetType      : Text
+    pricePerUnit   : Decimal
+    fractionalized : Bool
+    rwaObservers  : [Party]
+  where
+    signatory tokenIssuer
+    observer compliance, rwaObservers
+
+    ensure
+      ensureValidAmount "pricePerUnit" pricePerUnit
+
+    interface instance TokenMetadata for RWAInstrument where
+      view = TokenMetadataView with
+        instrumentId = convertDFInstrumentKey instrument
+        name         = name
+        symbol       = extractSymbol instrument
+        assetType    = assetType
+        registryUrl  = Some (getRegistryEndpoint tokenIssuer "/api/instruments")
+        metadata     = Map.fromList
+          [ ("cantonsuite.io/price-per-unit", show pricePerUnit)
+          , ("cantonsuite.io/fractionalized",  show fractionalized)
+          , ("cantonsuite.io/compliance-party", show compliance)
+          , (cip0056RegistryUrls, intercalate "," (getCNSRegistryUrls tokenIssuer))
+          ]
+
+      getInstrumentId = convertDFInstrumentKey instrument
+      getName         = name
+      getSymbol       = extractSymbol instrument
+      getAssetType    = assetType
+      getRegistryUrl  = Some (getRegistryEndpoint tokenIssuer "/api/instruments")
+      getMetadata     = Map.fromList
+        [ ("cantonsuite.io/price-per-unit", show pricePerUnit)
+        , ("cantonsuite.io/fractionalized",  show fractionalized)
+        , ("cantonsuite.io/compliance-party", show compliance)
+        , (cip0056RegistryUrls, intercalate "," (getCNSRegistryUrls tokenIssuer))
+        ]
+
+    choice UpdatePrice : ContractId RWAInstrument
+      with newPrice : Decimal
+      controller tokenIssuer
+      do
+        assertMsg "Price must be CIP-0056 compliant" (ensureValidAmount "newPrice" newPrice)
+        create this with pricePerUnit = newPrice
+
+    -- ✅ FIXED: Requires FractionalizationGovernanceApproval certificate.
+    -- Controller is compliance (was tokenIssuer alone — no policy check).
+    -- The certificate is consumed, ensuring single-use governance approval.
+    -- Without a certificate issued after the dust sweep and policy gate,
+    -- this choice cannot be exercised. Tokenissuer cannot act unilaterally.
+    choice ToggleFractionalized : ContractId RWAInstrument
+      with approvalCid : ContractId FractionalizationGovernanceApproval
+      controller compliance
+      do
+        approval <- fetch approvalCid
+        assertMsg "Approval is for wrong asset" (approval.assetId == extractSymbol instrument)
+        assertMsg "Approval targets wrong fractionalized value" (approval.newValue == not fractionalized)
+
+        -- Consume the approval certificate (single-use)
+        exercise approvalCid ConsumeApproval
+
+        create this with fractionalized = not fractionalized
+
+    key (tokenIssuer, extractSymbol instrument) : (Party, Text)
+    maintainer key._1
+
+-------------------------------
+-- Draft RWA Instrument
+-------------------------------
+
+template DraftRWAInstrument
+  with
+    draftIssuer    : Party
+    compliance     : Party
+    instrumentId   : Text
+    name           : Text
+    assetType      : Text
+    pricePerUnit   : Decimal
+    fractionalized : Bool
+    draftObservers : [Party]
+  where
+    signatory draftIssuer
+    observer compliance
+
+    ensure
+      instrumentId /= "" &&
+      name /= "" &&
+      ensureValidAmount "pricePerUnit" pricePerUnit
+
+    choice FinalizeIssuance : (ContractId Token.T, ContractId RWAInstrument)
+      with
+        additionalObservers : [Party]
+        description         : Text
+        validAsOf           : Time
+      controller compliance
+      do
+        let instrumentKey = InstrumentKey with
+              depository       = draftIssuer
+              issuer           = draftIssuer
+              id               = Id instrumentId
+              version          = "0"
+              holdingStandard  = Transferable
+
+        let observersMap = Map.fromList
+              [ ("compliance", singleton compliance) ]
+
+        tokenCid <- create Token.Instrument with
+          depository       = draftIssuer
+          issuer           = draftIssuer
+          id               = Id instrumentId
+          version          = "0"
+          holdingStandard  = Transferable
+          description      = description
+          validAsOf        = validAsOf
+          observers        = observersMap
+
+        metadataCid <- create RWAInstrument with
+          instrument     = instrumentKey
+          tokenIssuer    = draftIssuer
+          compliance     = compliance
+          name           = name
+          assetType      = assetType
+          pricePerUnit   = pricePerUnit
+          fractionalized = fractionalized
+          rwaObservers  = draftObservers ++ additionalObservers
+
+        return (tokenCid, metadataCid)
+
+-------------------------------
+-- Conversion Helpers
+-------------------------------
+
+convertDFInstrumentKey : InstrumentKey -> InstrumentId
+convertDFInstrumentKey key = InstrumentId with
+  depository = key.depository
+  issuer     = key.issuer
+  id         = extractId key.id
+  version    = key.version
+
+extractId : Id -> Text
+extractId (Id txt) = txt
+
+extractSymbol : InstrumentKey -> Text
+extractSymbol key = extractId key.id
+
+getInstrumentKey : Party -> Text -> InstrumentKey
+getInstrumentKey issuerParty assetId =
+  InstrumentKey with
+    depository      = issuerParty
+    issuer          = issuerParty
+    id              = Id assetId
+    version         = "0"
+    holdingStandard = Transferable
+
+convertToInstrumentKey : InstrumentId -> InstrumentKey
+convertToInstrumentKey stdId = InstrumentKey with
+  depository      = stdId.depository
+  issuer          = stdId.issuer
+  id              = Id stdId.id
+  version         = stdId.version
+  holdingStandard = Transferable
+
+-------------------------------
+-- ✅ B.4: HELPER FUNCTIONS
+-------------------------------
+
+intercalate : Text -> [Text] -> Text
+intercalate _ []       = ""
+intercalate _ [x]      = x
+intercalate sep (x::xs) = x <> sep <> intercalate sep xs

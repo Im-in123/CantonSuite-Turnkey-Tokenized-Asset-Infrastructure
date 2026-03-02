@@ -1,0 +1,496 @@
+-- | TokenStandard.FOP_Transfers - Free of Payment Transfer Implementation
+-- CIP-0056 API 3 - Transfer Instructions
+-- ✅ FIXED: Sender KYC moved to ExecuteTransfer (registry layer, compliance co-controller)
+-- ✅ FIXED: AcceptTransfer has NO VerifyKYC call — compliance check is done once at registry level
+-- ✅ ADDED: Synchronizer migration checks for CreateFOPTransfer.InitiateFOPTransferWithSyncCheck
+
+module TokenStandard.FOP_Transfers where
+
+import TokenStandard.Interfaces
+import Portfolio (Holding_Impl(..))
+import Compliance.Vouchers
+import DA.Map qualified as Map
+import DA.Time
+
+-------------------------------
+-- Transfer Instruction Implementation
+-------------------------------
+
+template TransferInstruction_Impl
+  with
+    sender           : Party
+    receiver         : Party
+    instrument       : InstrumentId
+    amount           : Decimal
+    deadline         : Time
+    status           : TransferStatus
+    metadata         : Metadata
+    senderHoldingCid : ContractId Holding
+  where
+    signatory sender
+    observer receiver, instrument.issuer
+
+    ensure amount > 0.0
+
+    interface instance TransferInstruction for TransferInstruction_Impl where
+      view = TransferInstructionView with
+        sender = sender
+        receiver = receiver
+        instrument = instrument
+        amount = amount
+        deadline = deadline
+        status = status
+        metadata = metadata
+
+      getSender = sender
+      getReceiver = receiver
+      getInstrument_TI = instrument
+      getAmount_TI = amount
+      getDeadline_TI = deadline
+      getStatus = status
+
+    nonconsuming choice InitiateExecution : ContractId TransferExecutionRequest
+      with
+        executionMetadata : Metadata
+      controller instrument.issuer
+      do
+        now <- getTime
+        assertMsg "Deadline passed" (now <= deadline)
+        assertMsg "Already executed" (status == Pending)
+
+        senderHolding <- fetch senderHoldingCid
+        assertMsg "Insufficient funds" (getAmount_H senderHolding >= amount)
+        assertMsg "Instrument mismatch" (getInstrument_H senderHolding == instrument)
+        assertMsg "Holding is locked" (not (isLocked senderHolding))
+
+        create TransferExecutionRequest with
+          sender = sender
+          receiver = receiver
+          instrument = instrument
+          amount = amount
+          senderHoldingCid = senderHoldingCid
+          instructionCid = toInterfaceContractId self
+          executionMetadata = executionMetadata
+
+    choice Abort : ()
+      with
+        reason        : Text
+        abortMetadata : Metadata
+      controller instrument.issuer
+      do
+        _ <- create this with
+          status = Aborted
+          metadata = addMetadata cip0056Reason reason abortMetadata
+        pure ()
+
+    choice Withdraw : ()
+      with
+        reason           : Text
+        withdrawMetadata : Metadata
+      controller sender
+      do
+        assertMsg "Can only withdraw pending transfers" (status == Pending)
+        _ <- create this with
+          status = Withdrawn
+          metadata = addMetadata cip0056Reason reason withdrawMetadata
+        pure ()
+
+-------------------------------
+-- Transfer Execution Request
+--
+-- KYC design:
+--   - SENDER voucher: verified by registry (compliance co-controller) in ExecuteTransfer ✅
+--   - RECEIVER voucher: NOT verified here — compliance already vetted both parties ✅
+--   - AcceptTransfer is purely Bob saying "yes, I accept these tokens" ✅
+-------------------------------
+
+template TransferExecutionRequest
+  with
+    sender            : Party
+    receiver          : Party
+    instrument        : InstrumentId
+    amount            : Decimal
+    senderHoldingCid  : ContractId Holding
+    instructionCid    : ContractId TransferInstruction
+    executionMetadata : Metadata
+  where
+    signatory instrument.issuer, sender
+    observer receiver
+
+    -- ✅ No voucher parameter — compliance check happened in ExecuteTransfer.
+    --    Bob just accepts the transfer.
+    choice AcceptTransfer : TransferResult
+      with
+      controller receiver, instrument.issuer 
+      do
+        senderHolding <- fetch senderHoldingCid
+
+        let concreteSenderCid = coerceContractId @Holding @Holding_Impl senderHoldingCid
+        concreteSender <- fetch concreteSenderCid
+
+        let complianceParty = concreteSender.compliance
+
+        assertMsg "Insufficient funds"  (getAmount_H senderHolding >= amount)
+        assertMsg "Instrument mismatch" (getInstrument_H senderHolding == instrument)
+        assertMsg "Holding is locked"   (not (isLocked senderHolding))
+
+        archive senderHoldingCid
+
+        if getAmount_H senderHolding > amount then do
+          let senderAccount = getAccount senderHolding
+          _ <- create Holding_Impl with
+            owner       = senderAccount.owner
+            assetId     = instrument.id
+            quantity    = getAmount_H senderHolding - amount
+            issuer      = instrument.issuer
+            compliance  = complianceParty
+            locked      = False
+            lockContext = None
+            metadata    = emptyMetadata
+            observers   = [] 
+          pure ()
+        else
+          pure ()
+
+        receiverHolding <- create Holding_Impl with
+          owner       = receiver
+          assetId     = instrument.id
+          quantity    = amount
+          issuer      = instrument.issuer
+          compliance  = complianceParty
+          locked      = False
+          lockContext = None
+          metadata    = executionMetadata
+          observers   = [] 
+
+        let concreteCid = coerceContractId @TransferInstruction @TransferInstruction_Impl instructionCid
+        concreteInstruction <- fetch concreteCid
+        archive concreteCid
+
+        now <- getTime
+        _ <- create concreteInstruction with
+          status   = Executed
+          metadata = addMetadata "execution-time" (show now) executionMetadata
+
+        return TransferResult with
+          receiverHoldingCid = toInterfaceContractId receiverHolding
+          resultMetadata     = executionMetadata
+
+    choice RejectTransfer : ()
+      with
+        reason : Text
+      controller receiver, instrument.issuer
+      do
+        let concreteCid = coerceContractId @TransferInstruction @TransferInstruction_Impl instructionCid
+        concreteInstruction <- fetch concreteCid
+        archive concreteCid
+
+        _ <- create concreteInstruction with
+          status   = Aborted
+          metadata = addMetadata cip0056Reason ("Rejected by receiver: " <> reason) concreteInstruction.metadata
+
+        pure ()
+
+-------------------------------
+-- Wallet-Friendly: Create FOP Transfer
+-- ✅ ADDED: InitiateFOPTransferWithSyncCheck choice for synchronizer-aware transfers
+-------------------------------
+
+template CreateFOPTransfer
+  with
+    sender   : Party
+    receiver : Party
+    assetId  : Text
+    issuer   : Party
+    amount   : Decimal
+  where
+    signatory sender
+    observer receiver, issuer
+
+    -- ✅ NEW: Synchronizer-aware FOP initiation
+    choice InitiateFOPTransferWithSyncCheck : Either Text (ContractId TransferInstruction)
+      with
+        senderHoldingCid    : ContractId Holding
+        deadlineHours       : Int
+        notes               : Text
+        senderCurrentSync   : Text
+        receiverCurrentSync : Text
+        targetSync          : Text
+      controller sender
+      do
+        senderHolding <- fetch senderHoldingCid
+        let senderAccount = getAccount senderHolding
+        assertMsg "Not the owner"        (senderAccount.owner == sender)
+        assertMsg "Insufficient balance" (getAmount_H senderHolding >= amount)
+        assertMsg "Asset mismatch"       ((getInstrument_H senderHolding).id == assetId)
+        assertMsg "Holding is locked"    (not (isLocked senderHolding))
+
+        -- Check synchronizer compatibility
+        let needsSenderMigration = senderCurrentSync /= targetSync
+        let needsReceiverMigration = receiverCurrentSync /= targetSync
+        
+        if needsSenderMigration || needsReceiverMigration then do
+          let senderMsg = if needsSenderMigration
+                         then "Sender on '" <> senderCurrentSync <> "' must migrate to '" <> targetSync <> "'"
+                         else ""
+          let receiverMsg = if needsReceiverMigration
+                           then "Receiver on '" <> receiverCurrentSync <> "' must migrate to '" <> targetSync <> "'"
+                           else ""
+          let fullMsg = "Cannot initiate transfer - synchronizer migration required: " <>
+                       senderMsg <>
+                       (if needsSenderMigration && needsReceiverMigration then "; " else "") <>
+                       receiverMsg <>
+                       ". Please complete migration before attempting transfer."
+          return (Left fullMsg)
+        else do
+          -- Parties on same sync - proceed
+          now <- getTime
+          let deadline = addRelTime now (hours deadlineHours)
+
+          instruction <- create TransferInstruction_Impl with
+            sender   = sender
+            receiver = receiver
+            instrument = InstrumentId with
+              depository = issuer
+              issuer     = issuer
+              id         = assetId
+              version    = "0"
+            amount           = amount
+            deadline         = deadline
+            status           = Pending
+            metadata         = Map.fromList
+              [ ("cantonsuite.io/transfer-type", "FOP-Sync-Aware")
+              , ("cantonsuite.io/initiated-at",  show now)
+              , ("cantonsuite.io/synchronizer",  targetSync)
+              , ("cantonsuite.io/notes",          notes)
+              ]
+            senderHoldingCid = senderHoldingCid
+
+          return (Right (toInterfaceContractId instruction))
+
+    -- ✅ EXISTING: Keep original InitiateFOPTransfer for backward compatibility
+    choice InitiateFOPTransfer : ContractId TransferInstruction
+      with
+        senderHoldingCid : ContractId Holding
+        deadlineHours    : Int
+        notes            : Text
+      controller sender
+      do
+        senderHolding <- fetch senderHoldingCid
+        let senderAccount = getAccount senderHolding
+        assertMsg "Not the owner"        (senderAccount.owner == sender)
+        assertMsg "Insufficient balance" (getAmount_H senderHolding >= amount)
+        assertMsg "Asset mismatch"       ((getInstrument_H senderHolding).id == assetId)
+        assertMsg "Holding is locked"    (not (isLocked senderHolding))
+
+        now <- getTime
+        let deadline = addRelTime now (hours deadlineHours)
+
+        instruction <- create TransferInstruction_Impl with
+          sender   = sender
+          receiver = receiver
+          instrument = InstrumentId with
+            depository = issuer
+            issuer     = issuer
+            id         = assetId
+            version    = "0"
+          amount           = amount
+          deadline         = deadline
+          status           = Pending
+          metadata         = Map.fromList
+            [ ("cantonsuite.io/transfer-type", "FOP")
+            , ("cantonsuite.io/initiated-at",  show now)
+            , ("cantonsuite.io/notes",          notes)
+            ]
+          senderHoldingCid = senderHoldingCid
+
+        return (toInterfaceContractId instruction)
+
+    choice CancelProposal : ()
+      controller sender
+      do pure ()
+
+-------------------------------
+-- Registry Transfer Execution Handler
+--
+-- ExecuteTransfer is controlled by [registry, complianceParty].
+-- Compliance is a signatory on the sender's ComplianceApprovalVoucher,
+-- so bringing compliance in as a co-controller gives full visibility
+-- to verify the sender's voucher — no explicit disclosure needed.
+-------------------------------
+
+template TransferExecutionHandler
+  with
+    registry        : Party
+    complianceParty : Party
+  where
+    signatory registry
+    observer complianceParty
+
+    nonconsuming choice ExecuteTransfer : ContractId TransferExecutionRequest
+      with
+        instructionCid   : ContractId TransferInstruction
+        senderVoucherCid : ContractId ComplianceApprovalVoucher
+      controller registry, complianceParty
+      do
+        instruction <- fetch instructionCid
+
+        let inst = getInstrument_TI instruction
+        assertMsg "Wrong registry" (inst.issuer == registry)
+        assertMsg "Must be pending" (getStatus instruction == Pending)
+
+        now <- getTime
+        assertMsg "Deadline passed" (now <= getDeadline_TI instruction)
+
+        -- ✅ Verify SENDER KYC here, at the registry level.
+        --    Compliance is a co-controller so it brings full visibility of sender's voucher.
+        exercise senderVoucherCid VerifyKYC with
+          tradeAmount  = getAmount_TI instruction
+          tradingParty = getSender instruction
+
+        let concreteCid = coerceContractId @TransferInstruction @TransferInstruction_Impl instructionCid
+
+        exercise concreteCid InitiateExecution with
+          executionMetadata = Map.fromList
+            [ ("cantonsuite.io/executed-by",    show registry)
+            , ("cantonsuite.io/execution-time", show now)
+            ]
+
+    nonconsuming choice AbortTransfer : ()
+      with
+        instructionCid : ContractId TransferInstruction
+        reason         : Text
+      controller registry
+      do
+        let concreteCid = coerceContractId @TransferInstruction @TransferInstruction_Impl instructionCid
+
+        exercise concreteCid Abort with
+          reason        = reason
+          abortMetadata = Map.fromList
+            [ ("cantonsuite.io/aborted-by",    show registry)
+            , ("cantonsuite.io/abort-reason",  reason)
+            ]
+
+-------------------------------
+-- Quick Send (Simplified Wallet UX)
+-------------------------------
+
+template QuickSendRequest
+  with
+    from   : Party
+    to     : Party
+    asset  : Text
+    issuer : Party
+    amount : Decimal
+    memo   : Text
+  where
+    signatory from
+    observer to, issuer
+
+    choice ConfirmSend : ContractId TransferInstruction
+      with
+        myHoldingCid     : ContractId Holding
+        hoursUntilExpiry : Int
+      controller from
+      do
+        now <- getTime
+        let deadline = addRelTime now (hours hoursUntilExpiry)
+
+        holding <- fetch myHoldingCid
+        let acct = getAccount holding
+        assertMsg "Not your holding"  (acct.owner == from)
+        assertMsg "Not enough tokens" (getAmount_H holding >= amount)
+        assertMsg "Wrong asset"       ((getInstrument_H holding).id == asset)
+        assertMsg "Holding is locked" (not (isLocked holding))
+
+        instruction <- create TransferInstruction_Impl with
+          sender   = from
+          receiver = to
+          instrument = InstrumentId with
+            depository = issuer
+            issuer     = issuer
+            id         = asset
+            version    = "0"
+          amount           = amount
+          deadline         = deadline
+          status           = Pending
+          metadata         = Map.fromList
+            [ ("cantonsuite.io/transfer-type", "Quick-Send")
+            , ("cantonsuite.io/memo",          memo)
+            , ("cantonsuite.io/initiated-at",  show now)
+            ]
+          senderHoldingCid = myHoldingCid
+
+        return (toInterfaceContractId instruction)
+
+-------------------------------
+-- Compliance-Gated Transfer
+-------------------------------
+
+template ComplianceGatedTransfer
+  with
+    sender          : Party
+    receiver        : Party
+    assetId         : Text
+    issuer          : Party
+    amount          : Decimal
+    complianceParty : Party
+    deadline        : Time
+    transferNotes   : Text
+  where
+    signatory sender
+    observer receiver, issuer, complianceParty
+
+    choice ApproveAndInitiate : ContractId TransferExecutionRequest
+      with
+        senderHoldingCid   : ContractId Holding
+        senderVoucherCid   : ContractId ComplianceApprovalVoucher
+        receiverVoucherCid : ContractId ComplianceApprovalVoucher
+      controller complianceParty
+      do
+        senderHolding <- fetch senderHoldingCid
+        assertMsg "Insufficient balance" (getAmount_H senderHolding >= amount)
+        assertMsg "Holding is locked"    (not (isLocked senderHolding))
+
+        now <- getTime
+        assertMsg "Deadline passed" (now <= deadline)
+
+        exercise senderVoucherCid VerifyKYC with
+          tradeAmount  = amount
+          tradingParty = sender
+        exercise receiverVoucherCid VerifyKYC with
+          tradeAmount  = amount
+          tradingParty = receiver
+
+        instruction <- create TransferInstruction_Impl with
+          sender   = sender
+          receiver = receiver
+          instrument = InstrumentId with
+            depository = issuer
+            issuer     = issuer
+            id         = assetId
+            version    = "0"
+          amount           = amount
+          deadline         = deadline
+          status           = Pending
+          metadata         = Map.fromList
+            [ ("cantonsuite.io/transfer-type", "FOP-Compliance-Gated")
+            , ("cantonsuite.io/approved-by",   show complianceParty)
+            , ("cantonsuite.io/notes",          transferNotes)
+            ]
+          senderHoldingCid = senderHoldingCid
+
+        let concreteCid = coerceContractId @TransferInstruction @TransferInstruction_Impl (toInterfaceContractId instruction)
+        exercise concreteCid InitiateExecution with
+          executionMetadata = Map.fromList
+            [ ("cantonsuite.io/compliance-approved", "true")
+            , ("cantonsuite.io/execution-time",      show now)
+            ]
+
+    choice RejectComplianceTransfer : ()
+      controller complianceParty
+      do pure ()
+
+    choice WithdrawComplianceTransfer : ()
+      controller sender
+      do pure ()

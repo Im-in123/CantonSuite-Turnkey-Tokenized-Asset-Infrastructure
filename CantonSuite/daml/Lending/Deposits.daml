@@ -1,0 +1,183 @@
+-- | Lending.Deposits - Deposit and withdrawal workflows (FIXED: Effect-Based D.1)
+-- ✅ FIXED: Uses DepositEffect/WithdrawalEffect instead of direct pool updates
+-- ✅ FIXED: Added compliance field to all Holding_Impl creations
+module Lending.Deposits where
+
+import Lending.Types
+import Lending.Pool
+import Portfolio (Holding_Impl(..))
+import TokenStandard.Interfaces
+import DA.Time
+
+-------------------------------
+-- ✅ FIXED: DEPOSIT REQUEST (Effect-Based)
+-------------------------------
+
+template DepositRequest
+  with
+    lender       : Party
+    poolOperator : Party
+    assetId      : Text
+    amount       : Decimal
+  where
+    signatory lender
+    observer poolOperator
+
+    -- ✅ FIXED: Creates DepositEffect instead of direct pool update
+    choice AcceptDeposit : (ContractId DepositEffect, ContractId LenderShare)
+      with
+        poolCid : ContractId LendingPool
+      controller poolOperator
+      do
+        pool <- fetch poolCid
+        assertMsg "Pool is Closed" (pool.status == Open)
+        
+        now <- getTime
+        
+        -- ✅ FIXED: Create deposit effect (doesn't consume pool)
+        effectCid <- create DepositEffect with
+          poolOperator = poolOperator
+          user = lender
+          poolCid = poolCid
+          assetId = assetId
+          amount = amount
+          timestamp = now
+          effectId = "DEPOSIT-" <> show lender <> "-" <> show now
+          poolSequence = pool.sequenceNumber
+        
+        -- Create lender share (estimated - actual minted when effect is applied)
+        let totalAssets = pool.totalLiquidity + pool.totalBorrowed
+        let estimatedShares = if pool.totalShares == 0.0
+                             then amount
+                             else (amount * pool.totalShares) / totalAssets
+        
+        shareCid <- create LenderShare with
+          lender = lender
+          poolOperator = poolOperator
+          assetId = assetId
+          shareAmount = estimatedShares
+        
+        return (effectCid, shareCid)
+
+    choice CancelDepositRequest : ()
+      controller lender
+      do pure ()
+
+-------------------------------
+-- LENDER SHARE (Unchanged)
+-------------------------------
+
+template LenderShare
+  with
+    lender       : Party
+    poolOperator : Party
+    assetId      : Text
+    shareAmount  : Decimal
+  where
+    signatory poolOperator, lender
+
+    choice RequestWithdrawal : ContractId WithdrawalRequest
+      with sharesToWithdraw : Decimal
+      controller lender
+      do
+        assertMsg "Not enough shares" (sharesToWithdraw <= shareAmount)
+        
+        if sharesToWithdraw < shareAmount then do
+          _ <- create this with shareAmount = shareAmount - sharesToWithdraw
+          pure ()
+        else 
+          pure ()
+
+        create WithdrawalRequest with
+          lender = lender
+          poolOperator = poolOperator
+          assetId = assetId
+          shares = sharesToWithdraw
+
+-------------------------------
+-- ✅ FIXED: WITHDRAWAL REQUEST (Effect-Based)
+-------------------------------
+
+template WithdrawalRequest
+  with
+    lender       : Party
+    poolOperator : Party
+    assetId      : Text
+    shares       : Decimal
+  where
+    signatory lender
+    observer poolOperator
+
+    -- ✅ FIXED: Creates WithdrawalEffect and returns holding with compliance field
+    choice ApproveWithdrawal : (ContractId WithdrawalEffect, ContractId Holding)
+      with
+        poolCid            : ContractId LendingPool
+        existingHoldingCid : Optional (ContractId Holding)
+      controller poolOperator, lender
+      do
+        pool <- fetch poolCid
+        now <- getTime
+        
+        -- Calculate estimated payout
+        let totalAssets = pool.totalLiquidity + pool.totalBorrowed
+        let estimatedPayout = (shares * totalAssets) / pool.totalShares
+        
+        -- ✅ FIXED: Create withdrawal effect
+        effectCid <- create WithdrawalEffect with
+          poolOperator = poolOperator
+          user = lender
+          poolCid = poolCid
+          assetId = assetId
+          shares = shares
+          timestamp = now
+          effectId = "WITHDRAW-" <> show lender <> "-" <> show now
+          poolSequence = pool.sequenceNumber
+        
+        -- ✅ FIXED: Create or merge holding with compliance field
+        holdingCid <- case existingHoldingCid of
+          Some allocCid -> do
+            alloc <- fetch allocCid
+            archive allocCid
+            newHolding <- create Holding_Impl with
+              owner = lender
+              assetId = assetId
+              quantity = getAmount_H alloc + estimatedPayout
+              issuer = poolOperator
+              compliance = pool.complianceParty  -- ✅ FIXED: Added compliance field
+              locked = False
+              lockContext = None
+              metadata = emptyMetadata
+              observers = []
+            return (toInterfaceContractId newHolding)
+          None -> do
+            newHolding <- create Holding_Impl with
+              owner = lender
+              assetId = assetId
+              quantity = estimatedPayout
+              issuer = poolOperator
+              compliance = pool.complianceParty  -- ✅ FIXED: Added compliance field
+              locked = False
+              lockContext = None
+              metadata = emptyMetadata
+              observers = []
+            return (toInterfaceContractId newHolding)
+        
+        return (effectCid, holdingCid)
+
+    choice RejectWithdrawal : ContractId LenderShare
+      controller poolOperator
+      do 
+        create LenderShare with
+          lender = lender
+          poolOperator = poolOperator
+          assetId = assetId
+          shareAmount = shares
+            
+    choice CancelWithdrawalRequest : ContractId LenderShare
+      controller lender
+      do 
+        create LenderShare with
+          lender = lender
+          poolOperator = poolOperator
+          assetId = assetId
+          shareAmount = shares

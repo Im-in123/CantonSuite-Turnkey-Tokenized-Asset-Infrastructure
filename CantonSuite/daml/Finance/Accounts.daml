@@ -1,0 +1,55 @@
+-- | Finance.Accounts - Account management using DAML Finance V4
+module Finance.Accounts where
+
+import Daml.Finance.Account.V4.Account qualified as Account
+import Daml.Finance.Interface.Types.Common.V3.Types (AccountKey(..), Id(..), HoldingFactoryKey(..))
+import Daml.Finance.Interface.Account.V4.Account qualified as IAccount
+import DA.Set qualified as Set
+import DA.Map qualified as Map
+
+template AccountFactory
+  with
+    provider : Party
+    observers : [Party]
+  where
+    signatory provider
+    observer observers
+    
+    nonconsuming choice CreateAccount : ContractId Account.T
+      with
+        accountOwner : Party
+        accountId    : Text
+        description  : Text
+      controller provider, accountOwner
+      do
+        let hfKey = HoldingFactoryKey with
+              provider = provider
+              id = Id "default"
+        
+        create Account.Account with
+          custodian = provider
+          owner = accountOwner
+          id = Id accountId
+          description = description
+          controllers = IAccount.Controllers with
+            outgoing = Set.singleton accountOwner
+            incoming = Set.singleton accountOwner
+          observers = Map.empty
+          holdingFactory = hfKey
+          lock = None
+
+getAccountKey : Party -> Party -> Text -> AccountKey
+getAccountKey custodian accountOwner accountId =
+  AccountKey with
+    custodian = custodian
+    owner = accountOwner
+    id = Id accountId
+
+tradingAccountId : Text
+tradingAccountId = "trading"
+
+lockedAccountId : Text
+lockedAccountId = "locked"
+
+poolAccountId : Text
+poolAccountId = "pool"

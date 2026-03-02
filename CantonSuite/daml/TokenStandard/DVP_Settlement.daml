@@ -1,0 +1,546 @@
+-- | TokenStandard.DVP_Settlement - Delivery versus Payment Implementation
+-- CIP-0056 API 4, 5, 6: Allocations, Allocation Requests, Allocation Instructions
+-- ✅ REFACTORED: Single-transaction atomic DVP settlement
+-- ✅ FIXED: WithdrawAllocation now reads compliance party from locked holding, not instrument.issuer
+-- ✅ NEW: Synchronizer migration checks integrated
+module TokenStandard.DVP_Settlement where
+
+import TokenStandard.Interfaces
+import Portfolio (Holding_Impl(..))
+import DA.Map qualified as Map
+import DA.Time
+
+-------------------------------
+-- Allocation Implementation
+-------------------------------
+
+template Allocation_Impl
+  with
+    owner            : Party
+    instrument       : InstrumentId
+    amount           : Decimal
+    settlementId     : Text
+    deadline         : Time
+    settlementApp    : Party
+    metadata         : Metadata
+    lockedHoldingCid : ContractId Holding
+  where
+    signatory owner, instrument.issuer
+    observer settlementApp
+    
+    ensure amount > 0.0
+    
+    interface instance Allocation for Allocation_Impl where
+      view = AllocationView with
+        owner = owner
+        instrument = instrument
+        amount = amount
+        settlementId = settlementId
+        deadline = deadline
+        settlementApp = settlementApp
+        metadata = metadata
+      
+      getOwner = owner
+      getInstrument_A = instrument
+      getAmount_A = amount
+      getSettlementId_A = settlementId
+      getDeadline_A = deadline
+      getSettlementApp_A = settlementApp
+    
+    -- ✅ FIXED: Read compliance party from the locked holding, not hardcoded to instrument.issuer
+    choice WithdrawAllocation : ContractId Holding
+      with
+        reason           : Text
+        withdrawMetadata : Metadata
+      controller owner
+      do
+        -- Fetch the locked holding to get the actual compliance party
+        let concreteCid = coerceContractId @Holding @Holding_Impl lockedHoldingCid
+        concreteHolding <- fetch concreteCid
+
+        -- ✅ FIXED: Use compliance party from the holding, not instrument.issuer
+        let complianceParty = concreteHolding.compliance
+
+        archive lockedHoldingCid
+        
+        unlockedHolding <- create Holding_Impl with
+          owner = owner
+          assetId = instrument.id
+          quantity = amount
+          issuer = instrument.issuer
+          compliance = complianceParty  -- ✅ FIXED: was instrument.issuer
+          locked = False
+          lockContext = None
+          metadata = addMetadata cip0056Reason reason withdrawMetadata
+          observers = [] 
+        
+        return (toInterfaceContractId unlockedHolding)
+
+-------------------------------
+-- Allocation Request Implementation
+-------------------------------
+
+template AllocationRequest_Impl
+  with
+    holder        : Party
+    instrument    : InstrumentId
+    amount        : Decimal
+    settlementId  : Text
+    deadline      : Time
+    settlementApp : Party
+    metadata      : Metadata
+  where
+    signatory settlementApp
+    observer holder
+    
+    ensure amount > 0.0
+    
+    interface instance AllocationRequest for AllocationRequest_Impl where
+      view = AllocationRequestView with
+        holder = holder
+        instrument = instrument
+        amount = amount
+        settlementId = settlementId
+        deadline = deadline
+        settlementApp = settlementApp
+        metadata = metadata
+      
+      getHolder_AR = holder
+      getInstrument_AR = instrument
+      getAmount_AR = amount
+      getSettlementId_AR = settlementId
+      getDeadline_AR = deadline
+      getSettlementApp_AR = settlementApp
+    
+    choice AcceptRequest : ContractId AllocationInstruction
+      with
+        holdingCid      : ContractId Holding
+        acceptMetadata  : Metadata
+      controller holder
+      do
+        holding <- fetch holdingCid
+        assertMsg "Insufficient funds" (getAmount_H holding >= amount)
+        assertMsg "Instrument mismatch" (getInstrument_H holding == instrument)
+        assertMsg "Holding is locked" (not (isLocked holding))
+        
+        instruction <- create AllocationInstruction_Impl with
+          holder = holder
+          instrument = instrument
+          amount = amount
+          settlementId = settlementId
+          deadline = deadline
+          settlementApp = settlementApp
+          metadata = acceptMetadata
+          sourceHoldingCid = holdingCid
+        
+        return (toInterfaceContractId instruction)
+    
+    choice RejectRequest : ()
+      with
+        reason         : Text
+        rejectMetadata : Metadata
+      controller holder
+      do 
+        assertMsg "Must provide reason" (reason /= "")
+        let finalMetadata = addMetadata cip0056Reason reason rejectMetadata
+        pure ()
+
+-------------------------------
+-- Allocation Instruction Implementation
+-------------------------------
+
+template AllocationInstruction_Impl
+  with
+    holder           : Party
+    instrument       : InstrumentId
+    amount           : Decimal
+    settlementId     : Text
+    deadline         : Time
+    settlementApp    : Party
+    metadata         : Metadata
+    sourceHoldingCid : ContractId Holding
+  where
+    signatory holder
+    observer instrument.issuer, settlementApp
+    
+    ensure amount > 0.0
+    
+    interface instance AllocationInstruction for AllocationInstruction_Impl where
+      view = AllocationInstructionView with
+        holder = holder
+        instrument = instrument
+        amount = amount
+        settlementId = settlementId
+        deadline = deadline
+        settlementApp = settlementApp
+        metadata = metadata
+      
+      getHolder_AI = holder
+      getInstrument_AI = instrument
+      getAmount_AI = amount
+      getSettlementId_AI = settlementId
+      getDeadline_AI = deadline
+      getSettlementApp_AI = settlementApp
+    
+    choice ExecuteInstruction : ContractId Allocation
+      with
+        executionMetadata : Metadata
+      controller instrument.issuer
+      do
+        now <- getTime
+        assertMsg "Deadline passed" (now <= deadline)
+        
+        sourceHolding <- fetch sourceHoldingCid
+        assertMsg "Insufficient funds" (getAmount_H sourceHolding >= amount)
+        assertMsg "Instrument mismatch" (getInstrument_H sourceHolding == instrument)
+        assertMsg "Already locked" (not (isLocked sourceHolding))
+
+        -- Read compliance from source holding
+        let concreteCid = coerceContractId @Holding @Holding_Impl sourceHoldingCid
+        concreteHolding <- fetch concreteCid
+        let complianceParty = concreteHolding.compliance
+        
+        archive sourceHoldingCid
+        
+        let (lockedAmount, remainderAmount) = 
+              if getAmount_H sourceHolding > amount
+              then (amount, Some (getAmount_H sourceHolding - amount))
+              else (amount, None)
+        
+        case remainderAmount of
+          Some remainder -> do
+            _ <- create Holding_Impl with
+              owner = holder
+              assetId = instrument.id
+              quantity = remainder
+              issuer = instrument.issuer
+              compliance = complianceParty
+              locked = False
+              lockContext = None
+              metadata = emptyMetadata
+              observers = []
+            pure ()
+          None -> pure ()
+        
+        lockedHolding <- create Holding_Impl with
+          owner = holder
+          assetId = instrument.id
+          quantity = lockedAmount
+          issuer = instrument.issuer
+          compliance = complianceParty
+          locked = True
+          lockContext = Some ("Settlement: " <> settlementId)
+          metadata = addMetadata cip0056LockContext settlementId executionMetadata
+          observers = []
+
+        allocation <- create Allocation_Impl with
+          owner = holder
+          instrument = instrument
+          amount = amount
+          settlementId = settlementId
+          deadline = deadline
+          settlementApp = settlementApp
+          metadata = executionMetadata
+          lockedHoldingCid = toInterfaceContractId lockedHolding
+        
+        return (toInterfaceContractId allocation)
+    
+    choice AbortInstruction : ()
+      with
+        reason        : Text
+        abortMetadata : Metadata
+      controller instrument.issuer
+      do 
+        assertMsg "Must provide reason" (reason /= "")
+        let finalMetadata = addMetadata cip0056Reason reason abortMetadata
+        pure ()
+    
+    choice WithdrawInstruction : ()
+      with
+        reason            : Text
+        withdrawMetadata  : Metadata
+      controller holder
+      do 
+        assertMsg "Must provide reason" (reason /= "")
+        let finalMetadata = addMetadata cip0056Reason reason withdrawMetadata
+        pure ()
+
+-------------------------------
+-- ✅ B.1: ATOMIC DVP SETTLEMENT
+-------------------------------
+
+template DVPSettlement
+  with
+    settlementId    : Text
+    settlementApp   : Party
+    buyer           : Party
+    seller          : Party
+    buyerAsset      : InstrumentId
+    sellerAsset     : InstrumentId
+    buyerAmount     : Decimal
+    sellerAmount    : Decimal
+    deadline        : Time
+    complianceParty : Party
+    regulatorParty  : Party
+    description     : Text
+  where
+    signatory settlementApp
+    observer buyer, seller, complianceParty, regulatorParty
+    
+    ensure
+      buyerAmount > 0.0 &&
+      sellerAmount > 0.0
+    
+    nonconsuming choice RequestAllocations : (ContractId AllocationRequest, ContractId AllocationRequest)
+      controller settlementApp
+      do
+        now <- getTime
+        assertMsg "Settlement already expired" (now < deadline)
+        
+        buyerReq <- create AllocationRequest_Impl with
+          holder = buyer
+          instrument = buyerAsset
+          amount = buyerAmount
+          settlementId = settlementId
+          deadline = deadline
+          settlementApp = settlementApp
+          metadata = Map.fromList
+            [ ("cantonsuite.io/settlement-id", settlementId)
+            , ("cantonsuite.io/counterparty", show seller)
+            , ("cantonsuite.io/role", "buyer")
+            , ("cantonsuite.io/description", description)
+            ]
+        
+        sellerReq <- create AllocationRequest_Impl with
+          holder = seller
+          instrument = sellerAsset
+          amount = sellerAmount
+          settlementId = settlementId
+          deadline = deadline
+          settlementApp = settlementApp
+          metadata = Map.fromList
+            [ ("cantonsuite.io/settlement-id", settlementId)
+            , ("cantonsuite.io/counterparty", show buyer)
+            , ("cantonsuite.io/role", "seller")
+            , ("cantonsuite.io/description", description)
+            ]
+        
+        return (toInterfaceContractId buyerReq, toInterfaceContractId sellerReq)
+    
+    -- ✅ NEW: Synchronizer-aware allocation request
+    nonconsuming choice RequestAllocationsWithSyncCheck : Either Text (ContractId AllocationRequest, ContractId AllocationRequest)
+      with
+        buyerCurrentSync  : Text
+        sellerCurrentSync : Text
+        targetSync        : Text
+      controller settlementApp
+      do
+        now <- getTime
+        assertMsg "Settlement already expired" (now < deadline)
+        
+        -- Check if migration is needed
+        let needsBuyerMigration = buyerCurrentSync /= targetSync
+        let needsSellerMigration = sellerCurrentSync /= targetSync
+        
+        if needsBuyerMigration || needsSellerMigration then do
+          let buyerMsg = if needsBuyerMigration 
+                        then "Buyer on " <> buyerCurrentSync <> " (needs migration to " <> targetSync <> ")"
+                        else ""
+          let sellerMsg = if needsSellerMigration
+                         then "Seller on " <> sellerCurrentSync <> " (needs migration to " <> targetSync <> ")"
+                         else ""
+          let fullMsg = "Synchronizer migration required before settlement: " <> buyerMsg <> 
+                       (if needsBuyerMigration && needsSellerMigration then "; " else "") <> 
+                       sellerMsg
+          return (Left fullMsg)
+        else do
+          -- All parties on same sync - proceed normally
+          buyerReq <- create AllocationRequest_Impl with
+            holder = buyer
+            instrument = buyerAsset
+            amount = buyerAmount
+            settlementId = settlementId
+            deadline = deadline
+            settlementApp = settlementApp
+            metadata = Map.fromList
+              [ ("cantonsuite.io/settlement-id", settlementId)
+              , ("cantonsuite.io/counterparty", show seller)
+              , ("cantonsuite.io/role", "buyer")
+              , ("cantonsuite.io/synchronizer", targetSync)
+              , ("cantonsuite.io/description", description)
+              ]
+          
+          sellerReq <- create AllocationRequest_Impl with
+            holder = seller
+            instrument = sellerAsset
+            amount = sellerAmount
+            settlementId = settlementId
+            deadline = deadline
+            settlementApp = settlementApp
+            metadata = Map.fromList
+              [ ("cantonsuite.io/settlement-id", settlementId)
+              , ("cantonsuite.io/counterparty", show buyer)
+              , ("cantonsuite.io/role", "seller")
+              , ("cantonsuite.io/synchronizer", targetSync)
+              , ("cantonsuite.io/description", description)
+              ]
+          
+          return (Right (toInterfaceContractId buyerReq, toInterfaceContractId sellerReq))
+    
+    choice ExecuteAtomicDVP : AtomicDVPResult
+      with
+        buyerAllocationCid  : ContractId Allocation
+        sellerAllocationCid : ContractId Allocation
+      controller settlementApp, buyer, seller
+      do
+        now <- getTime
+        assertMsg "Settlement deadline passed" (now <= deadline)
+        
+        buyerAlloc <- fetch buyerAllocationCid
+        sellerAlloc <- fetch sellerAllocationCid
+        
+        assertMsg "Buyer allocation mismatch" (getAmount_A buyerAlloc >= buyerAmount)
+        assertMsg "Seller allocation mismatch" (getAmount_A sellerAlloc >= sellerAmount)
+        assertMsg "Buyer allocation expired" (now <= getDeadline_A buyerAlloc)
+        assertMsg "Seller allocation expired" (now <= getDeadline_A sellerAlloc)
+        
+        let buyerConcreteCid = coerceContractId @Allocation @Allocation_Impl buyerAllocationCid
+        let sellerConcreteCid = coerceContractId @Allocation @Allocation_Impl sellerAllocationCid
+        
+        buyerConcreteAlloc <- fetch buyerConcreteCid
+        sellerConcreteAlloc <- fetch sellerConcreteCid
+        
+        archive buyerConcreteAlloc.lockedHoldingCid
+        
+        if getAmount_A buyerAlloc > buyerAmount then do
+          _ <- create Holding_Impl with
+            owner = buyer
+            assetId = buyerAsset.id
+            quantity = getAmount_A buyerAlloc - buyerAmount
+            issuer = buyerAsset.issuer
+            compliance = complianceParty
+            locked = False
+            lockContext = None
+            metadata = emptyMetadata
+            observers = [] 
+          pure ()
+        else pure ()
+        
+        archive sellerConcreteAlloc.lockedHoldingCid
+        
+        if getAmount_A sellerAlloc > sellerAmount then do
+          _ <- create Holding_Impl with
+            owner = seller
+            assetId = sellerAsset.id
+            quantity = getAmount_A sellerAlloc - sellerAmount
+            issuer = sellerAsset.issuer
+            compliance = complianceParty
+            locked = False
+            lockContext = None
+            metadata = emptyMetadata
+            observers = [] 
+          pure ()
+        else pure ()
+        
+        sellerPaymentHolding <- create Holding_Impl with
+          owner = seller
+          assetId = buyerAsset.id
+          quantity = buyerAmount
+          issuer = buyerAsset.issuer
+          compliance = complianceParty
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("cantonsuite.io/settlement-id", settlementId)
+            , ("cantonsuite.io/execution-time", show now)
+            , ("cantonsuite.io/transfer-type", "DVP-payment")
+            , ("cantonsuite.io/description", description)
+            ]
+          observers = []
+        
+        buyerAssetHolding <- create Holding_Impl with
+          owner = buyer
+          assetId = sellerAsset.id
+          quantity = sellerAmount
+          issuer = sellerAsset.issuer
+          compliance = complianceParty
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("cantonsuite.io/settlement-id", settlementId)
+            , ("cantonsuite.io/execution-time", show now)
+            , ("cantonsuite.io/transfer-type", "DVP-delivery")
+            , ("cantonsuite.io/description", description)
+            ]
+          observers = []
+        
+        archive buyerAllocationCid
+        archive sellerAllocationCid
+        
+        return AtomicDVPResult with
+          sellerReceivedPayment = toInterfaceContractId sellerPaymentHolding
+          buyerReceivedAsset = toInterfaceContractId buyerAssetHolding
+          executedAt = now
+    
+    choice CancelSettlement : ()
+      with
+        reason : Text
+      controller settlementApp
+      do 
+        assertMsg "Must provide reason" (reason /= "")
+        pure ()
+    
+    choice ExtendDeadline : ContractId DVPSettlement
+      with
+        newDeadline : Time
+      controller settlementApp, buyer, seller
+      do
+        now <- getTime
+        assertMsg "New deadline must be in future" (newDeadline > now)
+        create this with deadline = newDeadline
+
+-------------------------------
+-- ✅ B.1: Atomic DVP Result Type
+-------------------------------
+
+data AtomicDVPResult = AtomicDVPResult
+  with
+    sellerReceivedPayment : ContractId Holding
+    buyerReceivedAsset    : ContractId Holding
+    executedAt            : Time
+  deriving (Eq, Show)
+
+-------------------------------
+-- Registry Allocation Handler
+-------------------------------
+
+template AllocationExecutionHandler
+  with
+    registry        : Party
+    complianceParty : Party
+  where
+    signatory registry
+    observer complianceParty
+    
+    nonconsuming choice ExecuteAllocationInstruction : ContractId Allocation
+      with
+        instructionCid : ContractId AllocationInstruction
+      controller registry
+      do
+        instruction <- fetch instructionCid
+        
+        let inst = getInstrument_AI instruction
+        assertMsg "Wrong registry" (inst.issuer == registry)
+        
+        now <- getTime
+        assertMsg "Deadline passed" (now <= getDeadline_AI instruction)
+        
+        let concreteCid = coerceContractId @AllocationInstruction @AllocationInstruction_Impl instructionCid
+        
+        allocationCid <- exercise concreteCid ExecuteInstruction with
+          executionMetadata = Map.fromList
+            [ ("cantonsuite.io/executed-by", show registry)
+            , ("cantonsuite.io/execution-time", show now)
+            ]
+        
+        return allocationCid

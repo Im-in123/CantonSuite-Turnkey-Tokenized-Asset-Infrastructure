@@ -1,0 +1,922 @@
+-- | Scripts/StartupScript.daml
+-- Complete 15-phase demonstration of Canton Suite RWA Platform
+-- Follows the legal state transitions defined in the templates
+
+module Scripts.StartupScript where
+
+import Daml.Script
+import DA.Time
+import DA.Text (sha256)
+
+-- Core modules
+import Users qualified as U
+import Types
+import KYC qualified as K
+import Finance.Instruments
+import Portfolio
+import Trade qualified as T
+import TokenStandard.Interfaces
+import TokenStandard.FOP_Transfers
+import Compliance.Vouchers
+import Compliance.SanctionsRegistry
+
+-- Lending modules
+import Lending.Pool
+import Lending.Deposits
+import Lending.Loans
+import Lending.Types qualified as LT
+import Lending.CrossRegistryCollateral
+
+-- Distribution & Fractionalization
+import Distribution.ClaimBased
+import Finance.FractionalizationSafety
+
+-- Redemption
+import Redemption.Atomic
+
+-- Marketplace
+import Marketplace.MultiTier qualified as MP
+
+-- Network & Migration
+import Network.SynchronizerMigration qualified as Sync
+
+-- Canton Coin
+import CantonCoin.MiningRoundSync
+
+-- Regulator
+import Regulator
+
+----------------------------------------------------------------------
+-- RESULT TYPE DEFINITIONS
+----------------------------------------------------------------------
+
+data MarketplaceResult = MarketplaceResult
+  with
+    globalListing : ContractId MP.GlobalDiscoveryListing
+    firmMembership : ContractId MP.FirmMembership
+    firmListing : ContractId MP.FirmMarketplaceListing
+    invitation : ContractId MP.InvestorInvitation
+    clubDeal : ContractId MP.ClubDeal
+  deriving (Eq, Show)
+
+data LendingResult = LendingResult
+  with
+    lendingPool : ContractId LendingPool
+    depositRequest : ContractId DepositRequest
+    loanRequest : ContractId LoanRequest
+    loan : ContractId Loan
+  deriving (Eq, Show)
+
+data CrossRegistryLoanResult = CrossRegistryLoanResult
+  with
+    collateralRegistry : ContractId CollateralRegistry
+    loanRequest : ContractId CrossRegistryLoanRequest
+    loan : ContractId CrossRegistryLoan
+  deriving (Eq, Show)
+
+data DividendResult = DividendResult
+  with
+    announcement : ContractId DividendAnnouncement
+    claimRecord : ContractId DividendClaimRecord
+    dividendHolding : ContractId Holding
+  deriving (Eq, Show)
+
+data FractionalizationResult = FractionalizationResult
+  with
+    dustDetector : ContractId DustDetector
+    dustSweepCoordinator : ContractId DustSweepCoordinator
+    toggleApproval : ContractId FractionalizationGovernanceApproval
+  deriving (Eq, Show)
+
+data SynchronizerResult = SynchronizerResult
+  with
+    migrationRequest : ContractId Sync.SynchronizerMigrationRequest
+    migrationWorkflow : ContractId Sync.MigrationWorkflow
+  deriving (Eq, Show)
+
+data RedemptionResult = RedemptionResult
+  with
+    redemptionRequest : ContractId RedemptionRequest
+    redemptionWorkflow : ContractId RedemptionWorkflow
+  deriving (Eq, Show)
+
+data SetupResult = SetupResult
+  with
+    issuer : Party
+    alice : Party
+    bob : Party
+    charlie : Party
+    compliance : Party
+    regulator : Party
+    poolOperator : Party
+    bank : Party
+    hedgeFund : Party
+    firm : Party
+    borrower : Party
+    amuletApp : Party
+    publicMarket : Party
+    aliceUser : ContractId U.User
+    bobUser : ContractId U.User
+    aliceKYC : ContractId K.KYC
+    bobKYC : ContractId K.KYC
+    aliceVoucher : ContractId ComplianceApprovalVoucher
+    bobVoucher : ContractId ComplianceApprovalVoucher
+    sanctionsRegistry : ContractId SanctionsRegistry
+  deriving (Eq, Show)
+
+data AssetResult = AssetResult
+  with
+    propertyToken : ContractId RWAInstrument
+    bondToken : ContractId RWAInstrument
+    usdInstrument : ContractId RWAInstrument
+    cantonCoinInstrument : ContractId RWAInstrument
+    factory : ContractId HoldingFactory
+    alicePropertyHolding : ContractId Holding
+    bobBondHolding : ContractId Holding
+    charliePropertyHolding : ContractId Holding
+    fractionalizationGov : ContractId FractionalizationGovernance
+  deriving (Eq, Show)
+
+data MiningRoundResult = MiningRoundResult
+  with
+    miningRound : ContractId MiningRoundReference
+  deriving (Eq, Show)
+
+data TradeResult = TradeResult
+  with
+    buyerHolding : ContractId Holding
+    sellerHolding : ContractId Holding
+    regulatorView : ContractId RegulatorView
+  deriving (Eq, Show)
+
+data FOPResult = FOPResult
+  with
+    transferInstruction : ContractId TransferInstruction
+    receiverHolding : ContractId Holding
+  deriving (Eq, Show)
+
+----------------------------------------------------------------------
+-- PHASE 1: Platform Setup & User Onboarding
+----------------------------------------------------------------------
+
+setupPlatformAndUsers : Script SetupResult
+setupPlatformAndUsers = script do
+  -- 1. Allocate Parties
+  issuer <- allocateParty "PlatformIssuer"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  charlie <- allocateParty "Charlie"
+  compliance <- allocateParty "ComplianceOfficer"
+  regulator <- allocateParty "Regulator"
+  poolOperator <- allocateParty "PoolOperator"
+  bank <- allocateParty "Bank"
+  hedgeFund <- allocateParty "HedgeFund"
+  firm <- allocateParty "InvestmentFirm" -- Add this line!
+  borrower <- allocateParty "Borrower"
+  amuletApp <- allocateParty "AmuletApp"
+  publicMarket <- allocateParty "PublicMarket"
+
+  -- 2. Create User Profiles (Required for UI Dashboard Routing)
+  
+  -- GOVERNANCE ROLES
+  submit issuer $ createCmd U.User with
+    partyId = issuer, name = "Main Platform Issuer", email = "issuer@cantonsuite.io", role = Issuer
+
+  submit compliance $ createCmd U.User with
+    partyId = compliance, name = "Head of Compliance", email = "compliance@regtech.io", role = Compliance
+
+  submit regulator $ createCmd U.User with
+    partyId = regulator, name = "SEC Auditor", email = "audit@gov.us", role = Regulator
+
+  submit firm $ createCmd U.User with
+    partyId = firm, name = "Canton Investment Firm", email = "info@firm.com", role = Issuer
+    
+  -- INVESTOR ROLES (Buyer Dashboard)
+  aliceUser <- submit alice $ createCmd U.User with
+    partyId = alice, name = "Alice Investor", email = "alice@wealth.com", role = Buyer
+
+  bobUser <- submit bob $ createCmd U.User with
+    partyId = bob, name = "Bob Trader", email = "bob@retail.com", role = Buyer
+
+  submit hedgeFund $ createCmd U.User with
+    partyId = hedgeFund, name = "Alpha Hedge Fund", email = "trading@alpha.com", role = Buyer
+
+  -- DEFI / LENDING ROLES
+  -- Note: These parties use specialized dashboards, but usually map to Issuer or Buyer 
+  -- in the basic UI role-based routing.
+  submit poolOperator $ createCmd U.User with
+    partyId = poolOperator, name = "Liquidity Provider", email = "pool@defi.io", role = Issuer
+
+  submit bank $ createCmd U.User with
+    partyId = bank, name = "Global Custody Bank", email = "settlement@bank.com", role = Issuer
+
+  submit borrower $ createCmd U.User with
+    partyId = borrower, name = "Institutional Borrower", email = "loans@corp.com", role = Buyer
+
+  -- 3. KYC & Vouchers (Proceed with existing logic)
+  aliceKYC <- submitMulti [alice, compliance] [] $ createCmd K.KYC with
+    buyer = alice
+    compliance = compliance
+    status = KApproved
+
+  bobKYC <- submitMulti [bob, compliance] [] $ createCmd K.KYC with
+    buyer = bob
+    compliance = compliance
+    status = KApproved
+
+  now <- getTime
+  
+  aliceVoucher <- submit compliance $ createCmd ComplianceApprovalVoucher with
+    compliance = compliance
+    approvedParty = alice
+    assetId = "PROPERTY-TOKEN"
+    maxAmount = 1000000.0
+    expiresAt = addRelTime now (days 365)
+    approvalReason = "Verified institutional investor"
+    restrictions = []
+
+  bobVoucher <- submit compliance $ createCmd ComplianceApprovalVoucher with
+    compliance = compliance
+    approvedParty = bob
+    assetId = "CORPORATE-BOND"
+    maxAmount = 500000.0
+    expiresAt = addRelTime now (days 365)
+    approvalReason = "Verified retail investor"
+    restrictions = []
+
+  sanctionsRegistry <- submit compliance $ createCmd SanctionsRegistry with
+    compliance = compliance
+    regulator = regulator
+    sanctionedHashes = []
+    lastUpdated = now
+    listVersion = "v1.0"
+
+  return SetupResult with ..
+
+----------------------------------------------------------------------
+-- PHASE 2: Asset Tokenization & Issuance
+----------------------------------------------------------------------
+
+tokenizeAssets : SetupResult -> Script AssetResult
+tokenizeAssets setup = script do
+  now <- getTime
+
+  propertyDraft <- submit setup.issuer $ createCmd DraftRWAInstrument with
+    draftIssuer = setup.issuer
+    compliance = setup.compliance
+    instrumentId = "PROPERTY-TOKEN"
+    name = "Commercial Real Estate Token"
+    assetType = "RealEstate"
+    pricePerUnit = 1000.0
+    fractionalized = True
+    draftObservers = []
+
+  (_, propertyToken) <- submit setup.compliance $ exerciseCmd propertyDraft FinalizeIssuance with
+    additionalObservers = [setup.poolOperator, setup.bank, setup.borrower]
+    description = "Tokenized commercial real estate in NYC"
+    validAsOf = now
+
+  bondDraft <- submit setup.issuer $ createCmd DraftRWAInstrument with
+    draftIssuer = setup.issuer
+    compliance = setup.compliance
+    instrumentId = "CORPORATE-BOND"
+    name = "Corporate Bond Series A"
+    assetType = "Bond"
+    pricePerUnit = 100.0
+    fractionalized = False
+    draftObservers = []
+
+  (_, bondToken) <- submit setup.compliance $ exerciseCmd bondDraft FinalizeIssuance with
+    additionalObservers = [setup.poolOperator, setup.bank, setup.borrower]
+    description = "Investment grade corporate bond"
+    validAsOf = now
+
+  usdDraft <- submit setup.issuer $ createCmd DraftRWAInstrument with
+    draftIssuer = setup.issuer
+    compliance = setup.compliance
+    instrumentId = "USD"
+    name = "USD Stablecoin"
+    assetType = "Stablecoin"
+    pricePerUnit = 1.0
+    fractionalized = True
+    draftObservers = []
+
+  (_, usdInstrument) <- submit setup.compliance $ exerciseCmd usdDraft FinalizeIssuance with
+    additionalObservers = [setup.poolOperator, setup.bank, setup.borrower]
+    description = "Fiat-backed USD stablecoin"
+    validAsOf = now
+
+  ccDraft <- submit setup.issuer $ createCmd DraftRWAInstrument with
+    draftIssuer = setup.issuer
+    compliance = setup.compliance
+    instrumentId = "CANTON-COIN"
+    name = "Canton Coin"
+    assetType = "Cryptocurrency"
+    pricePerUnit = 10.0
+    fractionalized = True
+    draftObservers = []
+
+  (_, cantonCoinInstrument) <- submit setup.compliance $ exerciseCmd ccDraft FinalizeIssuance with
+    additionalObservers = [setup.poolOperator, setup.bank, setup.borrower]
+    description = "Canton Network native token"
+    validAsOf = now
+
+  factory <- submit setup.issuer $ createCmd HoldingFactory with
+    custodian = setup.issuer
+    compliance = setup.compliance
+    observers = []
+
+  alicePropertyHolding <- submitMulti [setup.issuer, setup.alice] [] $
+    exerciseCmd factory CreditHolding with
+      owner = setup.alice
+      assetId = "PROPERTY-TOKEN"
+      amount = 100.0
+      observers = []
+
+  bobBondHolding <- submitMulti [setup.issuer, setup.bob] [] $
+    exerciseCmd factory CreditHolding with
+      owner = setup.bob
+      assetId = "CORPORATE-BOND"
+      amount = 1000.0
+      observers = []
+
+  charliePropertyHolding <- submitMulti [setup.issuer, setup.charlie] [] $
+    exerciseCmd factory CreditHolding with
+      owner = setup.charlie
+      assetId = "PROPERTY-TOKEN"
+      amount = 0.3
+      observers = []
+
+  fractionalizationGov <- submit setup.issuer $ createCmd FractionalizationGovernance with
+    issuer = setup.issuer
+    compliance = setup.compliance
+    assetId = "PROPERTY-TOKEN"
+    currentlyFractionalized = True
+    policy = RequiresDustSweep
+    issuanceDate = now
+    canToggle = True
+
+  return AssetResult with ..
+
+----------------------------------------------------------------------
+-- PHASE 3: Mining Round Setup
+----------------------------------------------------------------------
+
+setupMiningRound : SetupResult -> Script MiningRoundResult
+setupMiningRound setup = script do
+  now <- getTime
+
+  miningRound <- submit setup.amuletApp $ createCmd MiningRoundReference with
+    roundNumber = 1
+    openedAt = now
+    expiresAt = addRelTime now (minutes 10)
+    amuletApp = setup.amuletApp
+    observers = [setup.amuletApp, setup.issuer, setup.poolOperator, setup.borrower, setup.bank]
+
+  return MiningRoundResult with ..
+
+----------------------------------------------------------------------
+-- PHASE 4: Marketplace Operations
+----------------------------------------------------------------------
+
+setupMarketplace : SetupResult -> AssetResult -> Script MarketplaceResult
+setupMarketplace setup assets = script do
+  now <- getTime
+
+  globalListing <- submit setup.issuer $ createCmd MP.GlobalDiscoveryListing with
+    listingId = "GLOBAL-PROPERTY-001"
+    issuer = setup.issuer
+    assetId = "PROPERTY-TOKEN"
+    instrumentCid = assets.propertyToken
+    quantity = 500.0
+    pricePerUnit = 1000.0
+    createdAt = now
+    expiresAt = addRelTime now (days 30)
+    minimumPurchase = 1.0
+    compliance = setup.compliance
+    discoveryService = setup.issuer
+    observers = [setup.publicMarket]
+
+  firmMembership <- submit setup.firm $ createCmd MP.FirmMembership with
+    firm = setup.firm
+    member = setup.hedgeFund
+    membershipId = "FIRM-001"
+    approvedAt = now
+    tierAccess = ["FIRM-MARKETPLACE", "FIRM-POOL"]
+
+  firmListing <- submit setup.issuer $ createCmd MP.FirmMarketplaceListing with
+    listingId = "FIRM-PROPERTY-001"
+    issuer = setup.issuer
+    assetId = "PROPERTY-TOKEN"
+    instrumentCid = assets.propertyToken
+    quantity = 200.0
+    pricePerUnit = 950.0
+    firmId = "FIRM-001"
+    createdAt = now
+    expiresAt = addRelTime now (days 30)
+    minimumPurchase = 10.0
+    compliance = setup.compliance
+    observers = [setup.hedgeFund]
+
+  invitation <- submit setup.issuer $ createCmd MP.InvestorInvitation with
+    listingId = "INVITE-PROPERTY-001"
+    issuer = setup.issuer
+    investor = setup.charlie
+    assetId = "PROPERTY-TOKEN"
+    quantity = 50.0
+    pricePerUnit = 900.0
+    expiresAt = addRelTime now (days 14)
+    minimumPurchase = 5.0
+    compliance = setup.compliance
+    invitationType = "SELECTED"
+
+  clubDeal <- submit setup.issuer $ createCmd MP.ClubDeal with
+    dealId = "CLUB-PROPERTY-001"
+    issuer = setup.issuer
+    assetId = "PROPERTY-TOKEN"
+    totalQuantity = 100.0
+    pricePerUnit = 850.0
+    minimumCommitment = 10.0
+    maximumInvestors = 5
+    currentInvestors = 0
+    expiresAt = addRelTime now (days 30)
+    compliance = setup.compliance
+    observers = [setup.alice, setup.bob, setup.hedgeFund]
+
+  return MarketplaceResult with ..
+
+----------------------------------------------------------------------
+-- PHASE 5: Trade Execution
+----------------------------------------------------------------------
+
+executeTradeAndDVP : SetupResult -> AssetResult -> MiningRoundResult -> Script TradeResult
+executeTradeAndDVP setup assets miningRound = script do
+  now <- getTime
+
+  aliceUSD <- submitMulti [setup.issuer, setup.alice] [] $
+    exerciseCmd assets.factory CreditHolding with
+      owner = setup.alice
+      assetId = "USD"
+      amount = 50000.0
+      observers = []
+
+  bobProperty <- submitMulti [setup.issuer, setup.bob] [] $
+    exerciseCmd assets.factory CreditHolding with
+      owner = setup.bob
+      assetId = "PROPERTY-TOKEN"
+      amount = 20.0
+      observers = []
+
+  tradeProp <- submit setup.alice $ createCmd T.ProposedTrade with
+    buyer = setup.alice
+    seller = setup.bob
+    assetIssuer = setup.issuer
+    assetId = "PROPERTY-TOKEN"
+    instrumentCid = assets.propertyToken
+    quantity = 10.0
+    pricePerUnit = 1000.0
+    isPrimary = False
+    complianceParty = setup.compliance
+    regulatorParty = setup.regulator
+    createdAt = now
+
+  tradeAgreement <- submit setup.bob $ exerciseCmd tradeProp T.SellerAccept
+
+  complianceReview <- submitMulti [setup.alice, setup.bob] [] $
+    exerciseCmd tradeAgreement T.RequestComplianceApproval
+
+  aliceTradeVoucher <- submit setup.compliance $ createCmd ComplianceApprovalVoucher with
+    compliance = setup.compliance
+    approvedParty = setup.alice
+    assetId = "USD"
+    maxAmount = 50000.0
+    expiresAt = addRelTime now (days 1)
+    approvalReason = "Trade voucher"
+    restrictions = []
+
+  bobTradeVoucher <- submit setup.compliance $ createCmd ComplianceApprovalVoucher with
+    compliance = setup.compliance
+    approvedParty = setup.bob
+    assetId = "PROPERTY-TOKEN"
+    maxAmount = 20.0
+    expiresAt = addRelTime now (days 1)
+    approvalReason = "Trade voucher"
+    restrictions = []
+
+  approvedTrade <- submit setup.compliance $ exerciseCmd complianceReview T.IssueApprovalVoucher with
+    buyerVoucherCid = aliceTradeVoucher
+    sellerVoucherCid = bobTradeVoucher
+    complianceNotes = "Approved"
+
+  settlementResult <- submitMulti [setup.issuer, setup.compliance, setup.alice, setup.bob] [] $
+    exerciseCmd approvedTrade T.ExecuteAtomicSettlement with
+      buyerPaymentCid = aliceUSD
+      sellerAssetCid = bobProperty
+      miningRoundCid = Some miningRound.miningRound
+
+  return TradeResult with
+    buyerHolding = settlementResult.buyerHolding
+    sellerHolding = settlementResult.sellerHolding
+    regulatorView = settlementResult.regulatorView
+
+----------------------------------------------------------------------
+-- PHASE 6: FOP
+----------------------------------------------------------------------
+
+executeFOPTransfers : SetupResult -> AssetResult -> Script FOPResult
+executeFOPTransfers setup assets = script do
+  proposal <- submit setup.charlie $ createCmd CreateFOPTransfer with
+    sender = setup.charlie
+    receiver = setup.alice
+    assetId = "PROPERTY-TOKEN"
+    issuer = setup.issuer
+    amount = 0.3
+
+  transferInstruction <- submit setup.charlie $ exerciseCmd proposal InitiateFOPTransfer with
+    senderHoldingCid = assets.charliePropertyHolding
+    deadlineHours = 24
+    notes = "Gift"
+
+  now <- getTime
+  charlieVoucher <- submit setup.compliance $ createCmd ComplianceApprovalVoucher with
+    compliance = setup.compliance
+    approvedParty = setup.charlie
+    assetId = "PROPERTY-TOKEN"
+    maxAmount = 1.0
+    expiresAt = addRelTime now (days 1)
+    approvalReason = "KYC"
+    restrictions = []
+
+  handler <- submit setup.issuer $ createCmd TransferExecutionHandler with
+    registry = setup.issuer
+    complianceParty = setup.compliance
+
+  execReqCid <- submitMulti [setup.issuer, setup.compliance] [] $
+    exerciseCmd handler ExecuteTransfer with
+      instructionCid = transferInstruction
+      senderVoucherCid = charlieVoucher
+
+  transferResult <- submitMulti [setup.issuer, setup.alice] [] $
+    exerciseCmd execReqCid AcceptTransfer
+
+  return FOPResult with
+    transferInstruction = transferInstruction
+    receiverHolding = transferResult.receiverHoldingCid
+
+----------------------------------------------------------------------
+-- PHASE 7: Lending (Fixed to follow Code Transitions)
+----------------------------------------------------------------------
+
+setupLendingPool : SetupResult -> AssetResult -> MiningRoundResult -> Script LendingResult
+setupLendingPool setup assets miningRound = script do
+  now <- getTime
+
+  lendingPool <- submit setup.poolOperator $ createCmd LendingPool with
+    poolOperator = setup.poolOperator
+    complianceParty = setup.compliance
+    assetId = "USD"
+    totalLiquidity = 0.0
+    totalBorrowed = 0.0
+    totalShares = 0.0
+    interestRate = 8.0
+    collateralRatio = 150.0
+    status = LT.Open
+    regulatorParty = setup.regulator
+    sequenceNumber = 0
+
+  aliceDepositHolding <- submitMulti [setup.issuer, setup.alice] [] $
+    exerciseCmd assets.factory CreditHolding with
+      owner = setup.alice
+      assetId = "USD"
+      amount = 50000.0
+      observers = []
+
+  depositRequest <- submit setup.alice $ createCmd DepositRequest with
+    lender = setup.alice
+    poolOperator = setup.poolOperator
+    assetId = "USD"
+    amount = 50000.0
+
+  (depositEffect, _) <- submit setup.poolOperator $ exerciseCmd depositRequest AcceptDeposit with
+    poolCid = lendingPool
+
+  (lendingPoolAfterDeposit, _) <- submit setup.poolOperator $ exerciseCmd depositEffect ApplyDepositEffect
+
+  borrowerCollateral <- submitMulti [setup.issuer, setup.borrower] [] $
+    exerciseCmd assets.factory CreditHolding with
+      owner = setup.borrower
+      assetId = "CORPORATE-BOND"
+      amount = 600.0
+      observers = [setup.poolOperator]
+
+  loanRequest <- submit setup.borrower $ createCmd LoanRequest with
+    borrower = setup.borrower
+    poolOperator = setup.poolOperator
+    assetId = "USD"
+    requestedAmount = 40000.0
+    collateralAssetId = "CORPORATE-BOND"
+    collateralAmount = 600.0
+    collateralCid = borrowerCollateral
+    durationDays = 30
+    createdAt = now
+    complianceParty = setup.compliance
+    regulatorParty = setup.regulator
+    miningRoundCid = Some miningRound.miningRound
+
+  -- ✅ FIX: Execute approval, archiving the old pool.
+  (loan, _, _) <- submit setup.poolOperator $ exerciseCmd loanRequest ApproveLoan with
+    poolCid = lendingPoolAfterDeposit
+    existingCashCid = None
+    borrowerCurrentSync = "global"
+    poolCurrentSync = "global"
+    targetSync = "global"
+
+  -- ✅ FIX: Re-query for the current pool state because the CID was archived.
+  [(newPoolCid, _)] <- query @LendingPool setup.poolOperator
+
+  return LendingResult with
+    lendingPool = newPoolCid
+    depositRequest = depositRequest
+    loanRequest = loanRequest
+    loan = loan
+
+----------------------------------------------------------------------
+-- PHASE 8: Cross-Registry
+----------------------------------------------------------------------
+
+setupCrossRegistryLoan : SetupResult -> AssetResult -> MiningRoundResult -> Script CrossRegistryLoanResult
+setupCrossRegistryLoan setup assets miningRound = script do
+  now <- getTime
+
+  collateralRegistry <- submit setup.bank $ createCmd CollateralRegistry with
+    registry = setup.bank
+    compliance = setup.compliance
+    acceptedAssets = [
+      ( InstrumentId with depository = setup.issuer; issuer = setup.issuer; id = "PROPERTY-TOKEN"; version = "0"
+      , CollateralTerms with maxLTV = 0.75; liquidationLTV = 0.80; minimumValueUSD = 5000.0; haircut = 0.10
+      )
+      ]
+
+  bobCollateral <- submitMulti [setup.issuer, setup.bob] [] $
+    exerciseCmd assets.factory CreditHolding with
+      owner = setup.bob
+      assetId = "PROPERTY-TOKEN"
+      amount = 100.0
+      observers = [setup.bank]
+
+  crossPool <- submit setup.bank $ createCmd LendingPool with
+    poolOperator = setup.bank
+    complianceParty = setup.compliance
+    assetId = "USD"
+    totalLiquidity = 200000.0
+    totalBorrowed = 0.0
+    totalShares = 200000.0
+    interestRate = 6.0
+    collateralRatio = 150.0
+    status = LT.Open
+    regulatorParty = setup.regulator
+    sequenceNumber = 0
+
+  crossLoanRequest <- submit setup.bob $ createCmd CrossRegistryLoanRequest with
+    borrower = setup.bob
+    poolOperator = setup.bank
+    lendingAsset = InstrumentId with depository = setup.bank; issuer = setup.bank; id = "USD"; version = "0"
+    collateralAsset = InstrumentId with depository = setup.issuer; issuer = setup.issuer; id = "PROPERTY-TOKEN"; version = "0"
+    collateralCid = bobCollateral
+    requestedAmount = 10000.0
+    collateralAmount = 100.0
+    durationDays = 60
+    collateralRegistryCid = collateralRegistry
+    createdAt = now
+    feeStructure = FeeStructure with
+      originationFeeBps = 50.0; managementFeeBps = 100.0; tradingFeeBps = 0.0; redemptionFeeBps = 0.0; performanceFeeBps = 0.0
+
+  (loan, _) <- submit setup.bank $ exerciseCmd crossLoanRequest ApproveCrossRegistryLoan with
+    poolCid = crossPool
+    collateralInstrumentCid = assets.propertyToken
+
+  return CrossRegistryLoanResult with
+    collateralRegistry = collateralRegistry
+    loanRequest = crossLoanRequest
+    loan = loan
+
+----------------------------------------------------------------------
+-- PHASE 9: Dividends
+----------------------------------------------------------------------
+
+distributeDividends : SetupResult -> AssetResult -> Script DividendResult
+distributeDividends setup assets = script do
+  now <- getTime
+
+  announcement <- submit setup.issuer $ createCmd DividendAnnouncement with
+    issuer = setup.issuer
+    compliance = setup.compliance
+    regulator = setup.regulator
+    assetId = "PROPERTY-TOKEN"
+    dividendLabel = "Q1-2026"
+    perUnitAmount = 50.0
+    snapshotTime = now
+    expirationTime = addRelTime now (days 90)
+    totalUnitsAtSnapshot = 100.0
+    totalDividendPool = 5000.0
+    announcementId = "DIV-2026"
+    eligibleHolders = [setup.alice]
+
+  (claimCid, claimRecord) <- submit setup.alice $ exerciseCmd announcement ClaimDividend with
+    holder = setup.alice
+    holdingSnapshot = 10.0
+    proofOfOwnership = "proof"
+
+  dividendHolding <- submit setup.alice $ exerciseCmd claimCid RedeemClaim
+
+  return DividendResult with ..
+
+----------------------------------------------------------------------
+-- PHASE 10: Dust
+----------------------------------------------------------------------
+
+testFractionalizationSafety : SetupResult -> AssetResult -> Script FractionalizationResult
+testFractionalizationSafety setup assets = script do
+  now <- getTime
+
+  dustDetector <- submit setup.issuer $ createCmd DustDetector with
+    assetId = "PROPERTY-TOKEN"
+    issuer = setup.issuer
+    compliance = setup.compliance
+
+  dustSweepCoordinator <- submit setup.issuer $ createCmd DustSweepCoordinator with
+    assetId = "PROPERTY-TOKEN"
+    coordinator = setup.issuer
+    compliance = setup.compliance
+    buyBackPrice = 1000.0000000000
+    deadline = addRelTime now (days 30)
+    dustHoldings = [(setup.alice, assets.alicePropertyHolding)]
+
+  toggleApproval <- submit setup.compliance $ createCmd FractionalizationGovernanceApproval with
+    assetId = "PROPERTY-TOKEN"
+    issuer = setup.issuer
+    compliance = setup.compliance
+    newValue = False
+    approvedAt = now
+
+  return FractionalizationResult with ..
+
+----------------------------------------------------------------------
+-- PHASE 11: Migration
+----------------------------------------------------------------------
+
+testSynchronizerMigration : SetupResult -> AssetResult -> Script SynchronizerResult
+testSynchronizerMigration setup assets = script do
+  now <- getTime
+
+  aliceHolding <- submitMulti [setup.issuer, setup.alice] [] $
+    exerciseCmd assets.factory CreditHolding with
+      owner = setup.alice
+      assetId = "PROPERTY-TOKEN"
+      amount = 25.0
+      observers = []
+
+  migrationRequest <- submit setup.alice $ createCmd Sync.SynchronizerMigrationRequest with
+    requester = setup.alice
+    issuer = setup.issuer
+    holdingCid = aliceHolding
+    currentSync = "global"
+    targetSync = "us-east"
+    reason = "Migration"
+    requestedAt = now
+    deadline = addRelTime now (hours 24)
+
+  migrationWorkflow <- submit setup.issuer $ exerciseCmd migrationRequest Sync.ApproveMigration
+
+  return SynchronizerResult with ..
+
+----------------------------------------------------------------------
+-- PHASE 12: Redemption (Fixed to follow code-defined handshake)
+----------------------------------------------------------------------
+
+testRedemption : SetupResult -> AssetResult -> Script RedemptionResult
+testRedemption setup assets = script do
+  now <- getTime
+
+  bobHolding <- submitMulti [setup.issuer, setup.bob] [] $
+    exerciseCmd assets.factory CreditHolding with
+      owner = setup.bob
+      assetId = "PROPERTY-TOKEN"
+      amount = 10.0
+      observers = []
+
+  redemptionRequest <- submit setup.bob $ createCmd RedemptionRequest with
+    redeemer = setup.bob
+    issuer = setup.issuer
+    compliance = setup.compliance
+    regulatorParty = setup.regulator
+    assetId = "PROPERTY-TOKEN"
+    quantity = 10.0
+    reason = "Cash out"
+    requestedAt = now
+    deadline = addRelTime now (days 2)
+    miningRoundCid = None
+
+  -- ✅ FIX: Do not create RedemptionWorkflow manually. 
+  -- Use InitiateRedemption flow which generates the multi-signatory Workflow contract.
+  initiator <- submitMulti [setup.bob, setup.issuer] [] $ createCmd InitiateRedemption with
+    redeemer = setup.bob
+    issuer = setup.issuer
+    compliance = setup.compliance
+    regulatorParty = setup.regulator
+    assetId = "PROPERTY-TOKEN"
+    quantity = 10.0
+    reason = "Cash out"
+
+  result <- submitMulti [setup.bob, setup.issuer] [] $ exerciseCmd initiator ExecuteRedemptionFlow with
+    holdingCid = bobHolding
+    deadlineHours = 48
+    miningRoundCid = None
+    redeemerCurrentSync = "global"
+    targetSync = "global"
+
+  case result of
+    Right workflowCid -> 
+      return RedemptionResult with
+        redemptionRequest = redemptionRequest
+        redemptionWorkflow = workflowCid
+    Left err -> error err
+
+----------------------------------------------------------------------
+-- PHASE 13: Compliance
+----------------------------------------------------------------------
+
+testComplianceEnforcement : SetupResult -> AssetResult -> Script ()
+testComplianceEnforcement setup assets = script do
+  now <- getTime
+
+  _ <- submit setup.compliance $ exerciseCmd setup.sanctionsRegistry IssueClearance with
+    partyToCheck = setup.alice
+    tradeId = "TRADE-001"
+    settlementWindow = 3600
+
+  charlieHolding <- submitMulti [setup.issuer, setup.charlie] [] $
+    exerciseCmd assets.factory CreditHolding with
+      owner = setup.charlie
+      assetId = "PROPERTY-TOKEN"
+      amount = 50.0
+      observers = []
+
+  let concreteHolding = coerceContractId @Holding @Holding_Impl charlieHolding
+
+  clawbackRequest <- submitMulti [setup.issuer, setup.compliance] [] $
+    exerciseCmd concreteHolding InitiateClawback with
+      legalReason = "Court Order"
+      jurisdiction = "NY"
+      caseReference = "123"
+
+  _ <- submit setup.compliance $ exerciseCmd clawbackRequest AuthorizeClawback with
+    complianceOfficer = "Jane"
+    authorizationDate = now
+    courtOrderHash = "hash"
+
+  return ()
+
+----------------------------------------------------------------------
+-- PHASE 14: Sanctions
+----------------------------------------------------------------------
+
+testSanctionsScreening : SetupResult -> Script ()
+testSanctionsScreening setup = script do
+  badActor <- allocateParty "SanctionedEntity"
+  let badHash = sha256 (show badActor)
+
+  updatedRegistry <- submit setup.compliance $ exerciseCmd setup.sanctionsRegistry AddSanctionedEntity with
+    partyHash = badHash
+    reason = "OFAC"
+
+  _ <- submit setup.compliance $ exerciseCmd updatedRegistry CheckSanctioned with
+    partyHash = badHash
+
+  return ()
+
+----------------------------------------------------------------------
+-- MAIN SCRIPT
+----------------------------------------------------------------------
+
+runCompleteStartupDemo : Script ()
+runCompleteStartupDemo = script do
+  debug "STARTING CANTON SUITE DEMO"
+
+  setup <- setupPlatformAndUsers
+  assets <- tokenizeAssets setup
+  miningRound <- setupMiningRound setup
+  _ <- setupMarketplace setup assets
+  _ <- executeTradeAndDVP setup assets miningRound
+  _ <- executeFOPTransfers setup assets
+  _ <- setupLendingPool setup assets miningRound
+  _ <- setupCrossRegistryLoan setup assets miningRound
+  _ <- distributeDividends setup assets
+  _ <- testFractionalizationSafety setup assets
+  _ <- testSynchronizerMigration setup assets
+  _ <- testRedemption setup assets
+  testComplianceEnforcement setup assets
+  testSanctionsScreening setup
+
+  debug "✅ ALL 14 PHASES COMPLETED SUCCESSFULLY"
+  return ()

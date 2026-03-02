@@ -1,0 +1,339 @@
+-- | Lending.Pool - Lending pool management (FIXED: Section D.1 + Privacy F.8)
+-- ✅ FIXED: Added complianceParty field (compilation blocker)
+-- ✅ FIXED: Removed observers list (privacy violation F.8)
+-- ✅ D.1: Pool Contention Fix - Effect-Based Pattern
+-- ✅ FIXED: foldlA indentation
+
+module Lending.Pool where
+
+import Lending.Types
+import DA.Time
+
+-------------------------------
+-- ✅ FIXED: LENDING POOL
+-------------------------------
+
+template LendingPool
+  with
+    poolOperator   : Party
+    complianceParty: Party  -- ✅ ADDED: Required for Holding_Impl creation
+    assetId        : Text
+    totalLiquidity : Decimal
+    totalBorrowed  : Decimal
+    totalShares    : Decimal
+    interestRate   : InterestRate
+    collateralRatio: Decimal
+    status         : PoolStatus
+    regulatorParty : Party
+    sequenceNumber : Int  -- ✅ D.1: Track version for optimistic concurrency
+  where
+    signatory poolOperator
+    observer complianceParty, regulatorParty  -- ✅ FIXED: No lender list (privacy F.8)
+    
+    ensure
+      totalLiquidity >= 0.0 &&
+      interestRate >= 0.0 &&
+      totalShares >= 0.0 &&
+      sequenceNumber >= 0
+    
+    -- ✅ D.1: NON-CONSUMING choice to get share price
+    -- Multiple users can query simultaneously
+    nonconsuming choice GetSharePrice : Decimal
+      controller poolOperator
+      do
+        let totalAssets = totalLiquidity + totalBorrowed
+        if totalShares == 0.0 then return 1.0
+        else return (totalAssets / totalShares)
+    
+    -- ✅ D.1: NON-CONSUMING choice to validate deposit
+    -- User creates effect without consuming pool
+    nonconsuming choice ValidateDeposit : Bool
+      with
+        amount : Decimal
+        user   : Party
+      controller poolOperator, user
+      do
+        assertMsg "Pool must be Open" (status == Open)
+        assertMsg "Amount must be positive" (amount > 0.0)
+        return True
+    
+    -- ✅ D.1: NON-CONSUMING choice to validate withdrawal
+    nonconsuming choice ValidateWithdrawal : Bool
+      with
+        shares : Decimal
+        user   : Party
+      controller poolOperator, user
+      do
+        assertMsg "Pool must be Open" (status == Open)
+        assertMsg "Shares must be positive" (shares > 0.0)
+        let totalAssets = totalLiquidity + totalBorrowed
+        let payout = (shares * totalAssets) / totalShares
+        assertMsg "Insufficient Liquidity in Pool" (totalLiquidity >= payout)
+        return True
+    
+    choice UpdateInterestRate : ContractId LendingPool
+      with newRate : InterestRate
+      controller poolOperator
+      do
+        create this with
+          interestRate = newRate
+          sequenceNumber = sequenceNumber + 1
+    
+    choice InitiateClosure : ContractId LendingPool
+      controller poolOperator
+      do
+        create this with
+          status = Closing
+          sequenceNumber = sequenceNumber + 1
+
+-------------------------------
+-- ✅ D.1: POOL EFFECT CONTRACTS
+-- These enable parallel operations
+-------------------------------
+
+-- Deposit Effect
+template DepositEffect
+  with
+    poolOperator   : Party
+    user           : Party
+    poolCid        : ContractId LendingPool
+    assetId        : Text
+    amount         : Decimal
+    timestamp      : Time
+    effectId       : Text
+    poolSequence   : Int  -- ✅ D.1: For optimistic concurrency check
+  where
+    signatory user
+    observer poolOperator
+    
+    ensure amount > 0.0
+    
+    -- ✅ D.1: Operator applies effect in batch
+    choice ApplyDepositEffect : (ContractId LendingPool, Decimal)
+      controller poolOperator
+      do
+        pool <- fetch poolCid
+        
+        -- Verify pool hasn't changed (optimistic concurrency)
+        assertMsg "Pool state changed, retry" (pool.sequenceNumber == poolSequence)
+        assertMsg "Pool is Closed" (pool.status == Open)
+        
+        -- Calculate shares to mint
+        let totalAssets = pool.totalLiquidity + pool.totalBorrowed
+        let sharesToMint = if pool.totalShares == 0.0
+                          then amount
+                          else (amount * pool.totalShares) / totalAssets
+        
+        -- Archive old pool and create new one
+        archive poolCid
+        newPoolCid <- create pool with
+          totalLiquidity = pool.totalLiquidity + amount
+          totalShares = pool.totalShares + sharesToMint
+          sequenceNumber = pool.sequenceNumber + 1
+        
+        return (newPoolCid, sharesToMint)
+    
+    choice CancelDepositEffect : ()
+      controller user
+      do pure ()
+
+-- Withdrawal Effect
+template WithdrawalEffect
+  with
+    poolOperator   : Party
+    user           : Party
+    poolCid        : ContractId LendingPool
+    assetId        : Text
+    shares         : Decimal
+    timestamp      : Time
+    effectId       : Text
+    poolSequence   : Int
+  where
+    signatory user
+    observer poolOperator
+    
+    ensure shares > 0.0
+    
+    choice ApplyWithdrawalEffect : (ContractId LendingPool, Decimal)
+      controller poolOperator
+      do
+        pool <- fetch poolCid
+        
+        -- Verify pool hasn't changed
+        assertMsg "Pool state changed, retry" (pool.sequenceNumber == poolSequence)
+        assertMsg "Pool is Closed" (pool.status == Open)
+        
+        -- Calculate payout
+        let totalAssets = pool.totalLiquidity + pool.totalBorrowed
+        let payout = (shares * totalAssets) / pool.totalShares
+        
+        assertMsg "Insufficient Liquidity in Pool" (pool.totalLiquidity >= payout)
+        
+        -- Archive old pool and create new one
+        archive poolCid
+        newPoolCid <- create pool with
+          totalLiquidity = pool.totalLiquidity - payout
+          totalShares = pool.totalShares - shares
+          sequenceNumber = pool.sequenceNumber + 1
+        
+        return (newPoolCid, payout)
+    
+    choice CancelWithdrawalEffect : ()
+      controller user
+      do pure ()
+
+-- Borrow Effect
+template BorrowEffect
+  with
+    poolOperator   : Party
+    borrower       : Party
+    poolCid        : ContractId LendingPool
+    assetId        : Text
+    amount         : Decimal
+    timestamp      : Time
+    effectId       : Text
+    poolSequence   : Int
+  where
+    signatory borrower
+    observer poolOperator
+    
+    ensure amount > 0.0
+    
+    choice ApplyBorrowEffect : ContractId LendingPool
+      controller poolOperator
+      do
+        pool <- fetch poolCid
+        
+        -- Verify pool hasn't changed
+        assertMsg "Pool state changed, retry" (pool.sequenceNumber == poolSequence)
+        assertMsg "Pool is Closed" (pool.status == Open)
+        assertMsg "Insufficient Liquidity" (pool.totalLiquidity >= amount)
+        
+        -- Archive old pool and create new one
+        archive poolCid
+        newPoolCid <- create pool with
+          totalLiquidity = pool.totalLiquidity - amount
+          totalBorrowed = pool.totalBorrowed + amount
+          sequenceNumber = pool.sequenceNumber + 1
+        
+        return newPoolCid
+    
+    choice CancelBorrowEffect : ()
+      controller borrower
+      do pure ()
+
+-- Repayment Effect
+template RepaymentEffect
+  with
+    poolOperator   : Party
+    borrower       : Party
+    poolCid        : ContractId LendingPool
+    assetId        : Text
+    principal      : Decimal
+    interest       : Decimal
+    timestamp      : Time
+    effectId       : Text
+    poolSequence   : Int
+  where
+    signatory borrower
+    observer poolOperator
+    
+    ensure principal > 0.0 && interest >= 0.0
+    
+    choice ApplyRepaymentEffect : ContractId LendingPool
+      controller poolOperator
+      do
+        pool <- fetch poolCid
+        
+        -- Verify pool hasn't changed
+        assertMsg "Pool state changed, retry" (pool.sequenceNumber == poolSequence)
+        
+        -- Archive old pool and create new one
+        archive poolCid
+        newPoolCid <- create pool with
+          totalBorrowed = pool.totalBorrowed - principal
+          totalLiquidity = pool.totalLiquidity + principal + interest
+          sequenceNumber = pool.sequenceNumber + 1
+        
+        return newPoolCid
+    
+    choice CancelRepaymentEffect : ()
+      controller borrower
+      do pure ()
+
+-------------------------------
+-- ✅ D.1: BATCH EFFECT PROCESSOR
+-- Operator can process multiple effects in one transaction
+-------------------------------
+
+template BatchEffectProcessor
+  with
+    poolOperator : Party
+    poolCid      : ContractId LendingPool
+  where
+    signatory poolOperator
+    
+    -- ✅ Process multiple deposits atomically
+    nonconsuming choice ProcessDepositBatch : ContractId LendingPool
+      with
+        depositEffectCids : [ContractId DepositEffect]
+      controller poolOperator
+      do
+        -- Apply each effect sequentially
+        foldlA (\currentPoolCid effectCid -> do
+          (newPoolCid, _) <- exercise effectCid ApplyDepositEffect
+          return newPoolCid
+          ) poolCid depositEffectCids
+    
+    -- ✅ Process multiple withdrawals atomically
+    nonconsuming choice ProcessWithdrawalBatch : ContractId LendingPool
+      with
+        withdrawalEffectCids : [ContractId WithdrawalEffect]
+      controller poolOperator
+      do
+        foldlA (\currentPoolCid effectCid -> do
+          (newPoolCid, _) <- exercise effectCid ApplyWithdrawalEffect
+          return newPoolCid
+          ) poolCid withdrawalEffectCids
+    
+    -- ✅ Process mixed effects in optimal order
+    nonconsuming choice ProcessMixedBatch : ContractId LendingPool
+      with
+        depositCids    : [ContractId DepositEffect]
+        withdrawalCids : [ContractId WithdrawalEffect]
+        borrowCids     : [ContractId BorrowEffect]
+        repaymentCids  : [ContractId RepaymentEffect]
+      controller poolOperator
+      do
+        -- Process repayments first (add liquidity)
+        poolAfterRepayments <- foldlA (\cid effectCid -> 
+          exercise effectCid ApplyRepaymentEffect
+          ) poolCid repaymentCids
+        
+        -- Then deposits (more liquidity)
+        poolAfterDeposits <- foldlA (\cid effectCid -> do
+          (newCid, _) <- exercise effectCid ApplyDepositEffect
+          return newCid
+          ) poolAfterRepayments depositCids
+        
+        -- Then borrows (reduce liquidity)
+        poolAfterBorrows <- foldlA (\cid effectCid -> 
+          exercise effectCid ApplyBorrowEffect
+          ) poolAfterDeposits borrowCids
+        
+        -- Finally withdrawals (further reduce)
+        foldlA (\cid effectCid -> do
+          (newCid, _) <- exercise effectCid ApplyWithdrawalEffect
+          return newCid
+          ) poolAfterBorrows withdrawalCids
+
+-------------------------------
+-- ✅ FIXED: HELPER FUNCTION
+-- Proper indentation and do syntax
+-------------------------------
+
+foldlA : (b -> a -> Update b) -> b -> [a] -> Update b
+foldlA f acc [] = return acc
+foldlA f acc (x :: xs) = do
+  newAcc <- f acc x
+  foldlA f newAcc xs

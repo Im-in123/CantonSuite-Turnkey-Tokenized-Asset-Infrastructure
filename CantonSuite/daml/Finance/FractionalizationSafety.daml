@@ -1,0 +1,451 @@
+-- | Finance.FractionalizationSafety - Safe Fractionalization Toggle
+-- ✅ SECTION E.3: Fractionalization Toggle Safety
+-- ✅ FIXED: CloseBuyBack return type includes ContractId
+-- ✅ FIXED: AcceptDustBuyBack returns receiptCid not receipt
+-- ✅ FIX AF-8: Removed explicit `archive self` from RecordDustSweepCompleted
+--              (consuming choice already implicitly archives; double-archive caused the error)
+-- ✅ FIX AF-11: Added `holder : Party` field to DustSweepBuyBack so the holder
+--               is an observer and can see and exercise AcceptDustBuyBack
+--
+-- PROBLEM: Toggling fractionalized from true to false can break accounts
+-- that hold fractional units (e.g., 0.5 shares). These become "dust" that
+-- cannot be traded in integer-only mode.
+--
+-- SOLUTION: Either lock fractionalized as immutable after issuance, OR
+-- require a "Dust Sweep" buy-back before allowing the toggle.
+
+module Finance.FractionalizationSafety where
+
+import DA.Time
+import DA.Map qualified as Map
+import Finance.Instruments (RWAInstrument)
+import Portfolio (Holding_Impl(..))
+import TokenStandard.Interfaces
+
+-------------------------------
+-- ✅ E.3: FRACTIONALIZATION POLICY
+-------------------------------
+
+data FractionalizationPolicy
+  = ImmutableAfterIssuance      -- Once set, never changes
+  | RequiresDustSweep           -- Can toggle after dust sweep
+  | RequiresUnanimousConsent    -- All holders must approve
+  deriving (Eq, Show)
+
+template FractionalizationGovernance
+  with
+    issuer              : Party
+    compliance          : Party
+    assetId             : Text
+    currentlyFractionalized : Bool
+    policy              : FractionalizationPolicy
+    issuanceDate        : Time
+    canToggle           : Bool
+  where
+    signatory issuer
+    observer compliance
+    
+    ensure
+      -- If immutable, canToggle must be False
+      (policy == ImmutableAfterIssuance) == (not canToggle)
+    
+    -- ✅ E.3: Attempt to toggle fractionalization
+    choice RequestFractionalizationToggle : Either Text (ContractId FractionalizationToggleRequest)
+      with
+        newValue : Bool
+        reason   : Text
+      controller issuer
+      do
+        now <- getTime
+        
+        -- Check if toggle is allowed by policy
+        case policy of
+          ImmutableAfterIssuance -> do
+            return (Left "Fractionalization is immutable after issuance per asset policy")
+          
+          RequiresDustSweep -> do
+            if newValue == currentlyFractionalized then
+              return (Left "New value same as current value")
+            else do
+              -- Create request that requires dust sweep
+              req <- create FractionalizationToggleRequest with
+                issuer = issuer
+                compliance = compliance
+                assetId = assetId
+                currentValue = currentlyFractionalized
+                newValue = newValue
+                reason = reason
+                requestedAt = now
+                requiresDustSweep = not newValue  -- Only when going to integer-only
+                dustSweepCompleted = False
+                holderApprovalsRequired = False
+                approvals = []
+              return (Right req)
+          
+          RequiresUnanimousConsent -> do
+            if newValue == currentlyFractionalized then
+              return (Left "New value same as current value")
+            else do
+              req <- create FractionalizationToggleRequest with
+                issuer = issuer
+                compliance = compliance
+                assetId = assetId
+                currentValue = currentlyFractionalized
+                newValue = newValue
+                reason = reason
+                requestedAt = now
+                requiresDustSweep = not newValue
+                dustSweepCompleted = False
+                holderApprovalsRequired = True
+                approvals = []
+              return (Right req)
+
+-------------------------------
+-- ✅ E.3: FRACTIONALIZATION TOGGLE REQUEST
+-------------------------------
+
+template FractionalizationToggleRequest
+  with
+    issuer                  : Party
+    compliance              : Party
+    assetId                 : Text
+    currentValue            : Bool
+    newValue                : Bool
+    reason                  : Text
+    requestedAt             : Time
+    requiresDustSweep       : Bool
+    dustSweepCompleted      : Bool
+    holderApprovalsRequired : Bool
+    approvals               : [Party]  -- Holders who approved
+  where
+    signatory issuer
+    observer compliance
+    
+    -- ✅ FIX AF-8: Removed explicit `archive self`.
+    -- This is a consuming choice — DAML already implicitly archives.
+    -- The explicit `archive self` caused a double-archive error.
+    choice RecordDustSweepCompleted : ContractId FractionalizationToggleRequest
+      with
+        dustSweepProof : Text  -- ContractId of DustSweepCompletion
+      controller compliance
+      do
+        assertMsg "Dust sweep not required" requiresDustSweep
+        create this with dustSweepCompleted = True
+    
+    -- ✅ E.3: Holder approves toggle
+    choice HolderApproval : ContractId FractionalizationToggleRequest
+      with
+        approver : Party
+      controller approver
+      do
+        assertMsg "Holder approvals not required" holderApprovalsRequired
+        assertMsg "Already approved" (not (approver `elem` approvals))
+        
+        archive self
+        create this with approvals = approvals ++ [approver]
+    
+    -- ✅ E.3: Execute toggle (after all requirements met)
+    choice ExecuteToggle : ContractId RWAInstrument
+      with
+        instrumentCid : ContractId RWAInstrument
+        allHolders    : [Party]  -- For unanimous consent check
+      controller compliance
+      do
+        -- Verify requirements
+        if requiresDustSweep then
+          assertMsg "Dust sweep not completed" dustSweepCompleted
+        else
+          pure ()
+        
+        if holderApprovalsRequired then
+          assertMsg "Not all holders approved" (length approvals == length allHolders)
+        else
+          pure ()
+        
+        -- Fetch and update instrument
+        instrument <- fetch instrumentCid
+        archive instrumentCid
+        
+        -- Create updated instrument
+        -- Note: In reality, you'd update the actual RWAInstrument template
+        -- This is simplified for the example
+        create instrument  -- Would be: create instrument { fractionalized = newValue }
+
+-------------------------------
+-- ✅ E.3: DUST DETECTION
+-------------------------------
+
+-- Detect holdings with fractional amounts
+template DustDetector
+  with
+    issuer     : Party
+    compliance : Party
+    assetId    : Text
+  where
+    signatory issuer
+    observer compliance
+    
+    -- ✅ E.3: Scan for dust holdings
+    nonconsuming choice DetectDustHoldings : DustReport
+      with
+        holdings : [(ContractId Holding, Decimal)]  -- (holdingCid, amount)
+      controller issuer
+      do
+        -- Identify holdings with fractional amounts
+        let dustHoldings = filter (\(_, amt) -> hasFractionalPart amt) holdings
+        
+        let totalDust = sum (map snd dustHoldings)
+        let affectedHolders = length dustHoldings
+        
+        return DustReport with
+          assetId = assetId
+          totalDustHoldings = affectedHolders
+          totalDustAmount = totalDust
+          dustHoldings = map fst dustHoldings
+          requiresSweep = affectedHolders > 0
+
+data DustReport = DustReport
+  with
+    assetId           : Text
+    totalDustHoldings : Int
+    totalDustAmount   : Decimal
+    dustHoldings      : [ContractId Holding]
+    requiresSweep     : Bool
+  deriving (Eq, Show)
+
+-- Check if number has fractional part
+hasFractionalPart : Decimal -> Bool
+hasFractionalPart x = x /= intToDecimal (truncate x)
+
+-------------------------------
+-- ✅ E.3: DUST SWEEP BUY-BACK
+-- ✅ FIX AF-11: Added `holder : Party` field so the holder is an observer
+--               and can see and exercise AcceptDustBuyBack on their contract.
+--               Create one DustSweepBuyBack per holder (one-per-holder model).
+-------------------------------
+
+-- Issuer buys back fractional holdings for a specific holder
+template DustSweepBuyBack
+  with
+    issuer        : Party
+    compliance    : Party
+    buyBackHolder : Party   -- ✅ FIX AF-11: per-holder field (renamed to avoid ambiguity)
+    assetId       : Text
+    buyBackPrice  : Decimal  -- Price per unit for dust buy-back
+    deadline      : Time
+  where
+    signatory issuer
+    observer compliance, buyBackHolder  -- ✅ FIX AF-11: holder can see their own buy-back offer
+    
+    ensure buyBackPrice > 0.0
+    
+    -- ✅ E.3: Holder accepts buy-back of dust
+    -- ✅ FIXED: Returns receiptCid not receipt
+    choice AcceptDustBuyBack : (ContractId Holding, ContractId DustBuyBackReceipt)
+      with
+        dustHoldingCid  : ContractId Holding
+      controller buyBackHolder
+      do
+        now <- getTime
+        assertMsg "Buy-back deadline passed" (now <= deadline)
+        
+        -- Fetch dust holding
+        dustHolding <- fetch dustHoldingCid
+        
+        let amount = getAmount_H dustHolding
+        assertMsg "Not a dust holding" (hasFractionalPart amount)
+        assertMsg "Wrong asset" ((getInstrument_H dustHolding).id == assetId)
+        
+        -- Calculate payment
+        let payment = amount * buyBackPrice
+        
+        -- Archive dust holding
+        archive dustHoldingCid
+        
+        -- Create cash payment holding
+        cashHolding <- create Holding_Impl with
+          owner = buyBackHolder
+          assetId = "USD"  -- Or whatever payment currency
+          quantity = payment
+          issuer = issuer
+          compliance = compliance
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("dust-buyback", "true")
+            , ("original-asset", assetId)
+            , ("dust-amount", show amount)
+            , ("buyback-price", show buyBackPrice)
+            ]
+          observers   = [] 
+        
+        -- Create receipt
+        receiptCid <- create DustBuyBackReceipt with
+          issuer = issuer
+          recipient = buyBackHolder
+          assetId = assetId
+          dustAmount = amount
+          payment = payment
+          completedAt = now
+        
+        return (toInterfaceContractId cashHolding, receiptCid)
+    
+    -- ✅ E.3: Close buy-back program
+    -- ✅ FIXED: Return type is ContractId DustSweepCompletion
+    choice CloseBuyBack : ContractId DustSweepCompletion
+      with
+        totalHoldersBoughtBack : Int
+        totalDustSwept         : Decimal
+      controller issuer
+      do
+        now <- getTime
+        assertMsg "Cannot close before deadline" (now > deadline)
+        
+        create DustSweepCompletion with
+          issuer = issuer
+          compliance = compliance
+          assetId = assetId
+          completedAt = now
+          holdersBoughtBack = totalHoldersBoughtBack
+          totalDustSwept = totalDustSwept
+
+-------------------------------
+-- ✅ E.3: DUST SWEEP COMPLETION CERTIFICATE
+-------------------------------
+
+template DustSweepCompletion
+  with
+    issuer            : Party
+    compliance        : Party
+    assetId           : Text
+    completedAt       : Time
+    holdersBoughtBack : Int
+    totalDustSwept    : Decimal
+  where
+    signatory issuer
+    observer compliance
+    
+    -- ✅ E.3: Verify no dust remains
+    nonconsuming choice VerifyNoDustRemains : Bool
+      with
+        remainingHoldings : [(ContractId Holding, Decimal)]
+      controller compliance
+      do
+        let dustRemains = any (\(_, amt) -> hasFractionalPart amt) remainingHoldings
+        return (not dustRemains)
+
+-------------------------------
+-- ✅ E.3: BUY-BACK RECEIPT
+-------------------------------
+
+template DustBuyBackReceipt
+  with
+    issuer      : Party
+    recipient   : Party
+    assetId     : Text
+    dustAmount  : Decimal
+    payment     : Decimal
+    completedAt : Time
+  where
+    signatory issuer, recipient
+    
+    choice AcknowledgeReceipt : ()
+      controller recipient
+      do pure ()
+
+-------------------------------
+-- ✅ E.3: AUTOMATIC DUST SWEEP COORDINATOR
+-- ✅ NOTE: InitiateSweep now creates per-holder DustSweepBuyBack contracts.
+--          dustHoldings is now [(Party, ContractId Holding)] to carry holder identity.
+-------------------------------
+
+-- Coordinates entire dust sweep process
+template DustSweepCoordinator
+  with
+    coordinator   : Party
+    compliance    : Party
+    assetId       : Text
+    buyBackPrice  : Decimal
+    deadline      : Time
+    dustHoldings  : [(Party, ContractId Holding)]  -- ✅ FIX AF-11: (holder, holdingCid) pairs
+  where
+    signatory coordinator
+    observer compliance
+    
+    -- ✅ E.3: Initiate sweep — one DustSweepBuyBack per holder
+    nonconsuming choice InitiateSweep : [ContractId DustSweepBuyBack]
+      controller coordinator
+      do
+        forA dustHoldings $ \(holderParty, _) ->
+          create DustSweepBuyBack with
+            issuer = coordinator
+            compliance = compliance
+            buyBackHolder = holderParty
+            assetId = assetId
+            buyBackPrice = buyBackPrice
+            deadline = deadline
+    
+    -- ✅ E.3: Check sweep progress
+    nonconsuming choice CheckSweepProgress : SweepProgress
+      with
+        completedBuyBacks : Int
+      controller coordinator
+      do
+        let totalDust = length dustHoldings
+        let percentComplete = if totalDust == 0
+                             then 100.0
+                             else (intToDecimal completedBuyBacks / intToDecimal totalDust) * 100.0
+        
+        return SweepProgress with
+          totalDustHoldings = totalDust
+          completedBuyBacks = completedBuyBacks
+          percentComplete = percentComplete
+          remainingDust = totalDust - completedBuyBacks
+
+data SweepProgress = SweepProgress
+  with
+    totalDustHoldings : Int
+    completedBuyBacks : Int
+    percentComplete   : Decimal
+    remainingDust     : Int
+  deriving (Eq, Show)
+
+-------------------------------
+-- ✅ E.3: IMMUTABLE FRACTIONALIZATION
+-------------------------------
+
+-- For assets where fractionalization should NEVER change
+template ImmutableFractionalization
+  with
+    issuer              : Party
+    compliance          : Party
+    assetId             : Text
+    fractionalizedValue : Bool
+    setAtIssuance       : Time
+    permanentlyLocked   : Bool
+  where
+    signatory issuer, compliance
+    
+    ensure permanentlyLocked
+    
+    -- ✅ E.3: Cannot toggle - always fails
+    choice AttemptToggle : ()
+      with
+        requestor : Party
+      controller requestor
+      do
+        abort "Fractionalization is permanently locked for this asset"
+    
+    -- ✅ E.3: Query current setting
+    nonconsuming choice GetFractionalizationSetting : (Bool, Time)
+      controller issuer, compliance
+      do
+        return (fractionalizedValue, setAtIssuance)
+
+-------------------------------
+-- ✅ E.3: HELPER FUNCTIONS
+-------------------------------
+
+-- Replicate action N times
+replicateA : Int -> Update a -> Update [a]
+replicateA n action = mapA (\_ -> action) [1..n]

@@ -1,0 +1,10 @@
+-- | Lending.Types - Shared types for lending module
+module Lending.Types where
+
+type InterestRate = Decimal
+
+data PoolStatus = Open | Closing | Closed
+  deriving (Eq, Show, Ord)
+
+data LoanStatus = Active | Defaulted | Repaid
+  deriving (Eq, Show, Ord)
