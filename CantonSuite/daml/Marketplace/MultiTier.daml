@@ -2,25 +2,7 @@
 -- ✅ SECTION F.6: Multi-Tiered Distribution Logic
 -- ✅ SECTION F.7: Bilateral Subscription Workflow
 -- ✅ SECTION F.8: Investor Privacy (Anti-Collusion)
--- ✅ FIXED: Optional pattern matching for directRecipient
---
--- ✅ FIXED (Bug 1): GlobalDiscoveryListing, FirmMarketplaceListing, ClubDeal now have an
---    `observers : [Party]` field. DAML requires a choice's controller to be a stakeholder
---    on the contract. `controller buyer` / `controller investor` on nonconsuming choices
---    where the buyer/investor is neither signatory nor observer caused:
---    "contract not visible to reading parties".
---    The issuer populates `observers` with known buyers/investors before publishing.
---    This does NOT break F.8 privacy — investors still cannot see each other because
---    each listing is a fresh contract with only the relevant buyer in its observer set.
---    For truly open/public listings (GlobalTier), pass `observers = []` and have
---    buyers submit via `submitMulti [buyer, issuer]` in production, or pass `[buyer]`
---    when the buyer is known (as in tests). The test helper sets `observers = [alice]`.
---
--- ✅ FIXED (Bug 2): SubscriptionRequest.instrumentCid changed from
---    `ContractId RWAInstrument` to `Optional (ContractId RWAInstrument)`.
---    The field was never used in any choice body, but the test passed `error "not used"`
---    as a placeholder, which throws a GeneralError at contract creation time.
---    Making it Optional allows `None` to be passed safely.
+ 
 --
 -- MARKETPLACE TIERS:
 -- 1. Global - Public discovery (anyone can see)
@@ -84,6 +66,8 @@ template PrivacyPreservingListing
 
     -- ✅ F.6: TIER 1 - Global Discovery
     choice PublishToGlobalDiscovery : ContractId GlobalDiscoveryListing
+      with 
+        publicParty : Party
       controller issuer
       do
         assertMsg "Wrong tier" (visibility.tier == GlobalTier)
@@ -99,8 +83,9 @@ template PrivacyPreservingListing
           expiresAt        = expiresAt
           minimumPurchase  = minimumPurchase
           compliance       = compliance
-          discoveryService = issuer  -- Could be separate discovery party
-          observers        = []      -- Populated by issuer when buyers are known
+          discoveryService = issuer
+          publicParty      = publicParty -- ✅ Added
+          observers        = []
 
     -- ✅ F.6: TIER 2 - Firm-Only Marketplace
     choice PublishToFirmMarketplace : ContractId FirmMarketplaceListing
@@ -183,14 +168,11 @@ template GlobalDiscoveryListing
     minimumPurchase  : Decimal
     compliance       : Party
     discoveryService : Party
-    -- ✅ FIXED: observers field added so buyers can be stakeholders.
-    --           DAML requires `controller buyer` to be a stakeholder on this contract.
-    --           The issuer passes known buyers here, or an empty list for truly open
-    --           listings where buyers submit via submitMulti [buyer, issuer] in production.
+    publicParty      : Party 
     observers        : [Party]
   where
     signatory issuer
-    observer discoveryService, compliance, observers
+    observer discoveryService, compliance, publicParty, observers
 
     nonconsuming choice ExpressInterest : ContractId PurchaseIntent
       with

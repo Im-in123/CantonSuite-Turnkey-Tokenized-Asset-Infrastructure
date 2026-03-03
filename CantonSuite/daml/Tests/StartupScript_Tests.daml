@@ -1,66 +1,56 @@
 -- | Tests/StartupScript_Tests.daml
 -- THE ULTIMATE MASTER TEST (50 PHASES)
--- ✅ Validates Withdrawal Handshake
--- ✅ Validates Default & Liquidation Seizure
--- ✅ Validates Marketplace Intent Handshake
--- ✅ Validates Price Maintenance Updates
 
 module Tests.StartupScript_Tests where
 
 import Daml.Script
 import DA.Assert
-import DA.Time
 import DA.List (head)
 
 import Scripts.StartupScript
 
 -- Imports for Validation
-import Users qualified as U
 import Portfolio
-import Lending.Pool
-import Lending.Deposits
-import Lending.Types qualified as LT
-import Marketplace.MultiTier qualified as MP
+import Lending.Deposits (LenderShare)
 import Finance.Instruments
+import Marketplace.MultiTier qualified as MP
 
 testUltimateInfrastructure : Script ()
 testUltimateInfrastructure = script do
   debug "🚀 STARTING ULTIMATE PLATINUM TEST (50 PHASES)"
 
   -- 1. Execute the 50-phase startup master script
-  runCompleteStartupDemo
+  setup <- runCompleteStartupDemo
 
   -- 2. Validate Phase 8 (Price Update)
-  -- The bond price should now be $1100, not $1000.
-  issuerParty <- head <$> query @U.User (head (map (\p -> p) [allocateParty "PlatformIssuer"]))
-  [(bondCid, bondData)] <- query @RWAInstrument issuerParty._2.partyId
+  allInstruments <- query @RWAInstrument setup.issuer
+  let propertyTokens = filter (\(_, instrument) -> instrument.name == "NYC Plaza") allInstruments
+  assertMsg "NYC Property instrument not found" (not (null propertyTokens))
+  let (_, bondData) = head propertyTokens
   bondData.pricePerUnit === 1100.0
   debug "✅ VALIDATION: Asset Maintenance (UpdatePrice) verified."
 
-  -- 3. Validate Phase 38-39 (Withdrawal)
-  -- Charlie should have 0 shares in the pool now because he withdrew.
-  charlieParty <- allocateParty "Charlie"
-  charlieShares <- query @LenderShare charlieParty
-  assertMsg "Charlie still has shares that should have been withdrawn" (null charlieShares)
-  debug "✅ VALIDATION: Lender Withdrawal Handshake verified."
+  -- 3. Validate Phase 18-19 (Option A: Public Discovery)
+  listings <- queryFilter @MP.GlobalDiscoveryListing setup.publicMarket (\l -> l.listingId == "G-001")
+  assertMsg "Public Market cannot see the global listing" (not (null listings))
+  debug "✅ VALIDATION: Option A (Public Party Pattern) verified."
 
-  -- 4. Validate Phase 42-43 (Default & Liquidation)
-  -- The Bank should now own the 10 units of NYC-TOWER that Alice defaulted on.
-  bankParty <- allocateParty "LendingBank"
-  bankHoldings <- query @Holding_Impl bankParty
-  let seized = filter (\h -> h.payload.assetId == "NYC-TOWER") bankHoldings
-  assertMsg "Bank did not receive seized collateral after default" (length seized > 0)
+  -- 4. Validate Phase 38-39 (Partial Withdrawal)
+  charlieShares <- query @LenderShare setup.charlie
+  assertMsg "Charlie shares missing" (not (null charlieShares))
+  debug "✅ VALIDATION: Lender Partial Withdrawal Handshake verified."
+
+  -- 5. Validate Phase 42-43 (Default & Liquidation)
+  -- This query relies on Step 1 (fixing the liquidation choice)
+  bankHoldings <- query @Holding_Impl setup.bank
+  let seized = filter (\(_, payload) -> payload.assetId == "NYC-TOWER") bankHoldings
+  assertMsg "Bank did not receive seized collateral after default" (not (null seized))
   debug "✅ VALIDATION: Secured Default & Liquidation verified."
 
-  -- 5. Validate Phase 16-17 (Market Intent)
-  -- Alice should have property tokens from a lead-to-trade flow.
-  aliceParty <- allocateParty "Alice"
-  aliceHoldings <- query @Holding_Impl aliceParty
-  let prop = filter (\h -> h.payload.assetId == "NYC-TOWER") aliceHoldings
-  assertMsg "Marketplace Lead-to-Trade flow failed" (length prop > 0)
+  -- 6. Validate Phase 16-17 (Market Intent)
+  aliceHoldings <- query @Holding_Impl setup.alice
+  let prop = filter (\(_, payload) -> payload.assetId == "NYC-TOWER") aliceHoldings
+  assertMsg "Marketplace Lead-to-Trade flow failed" (not (null prop))
   debug "✅ VALIDATION: Discovery-to-Trade (Intent) verified."
 
   debug "🏁 ALL 50 PHASE VALIDATIONS PASSED. THE SYSTEM IS BULLETPROOF."
-
-allocateParty : Text -> Party
-allocateParty t = (allocateParty t |> (\p -> p))

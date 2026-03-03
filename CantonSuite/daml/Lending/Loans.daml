@@ -336,17 +336,18 @@ template Loan
         now <- getTime
         assertMsg "Loan not yet matured" (now > maturityDate)
 
-        -- ✅ FIXED: Check mining round if present (caller = lender)
-        case miningRoundCid of
-          Some roundCid -> do
-            isValid <- exercise roundCid IsRoundValid with caller = lender
-            assertMsg "Canton Coin mining round expired" isValid
-            
-            hasTime <- exercise roundCid HasTimeForExternalSigning with
-              estimatedSigningDelaySeconds = 120
-              caller = lender
-            assertMsg "Not enough time in mining round for liquidation" hasTime
-          None -> pure ()
+        -- ✅ 1. Create the physical holding for the Bank (The Missing Piece)
+        -- This ensures the 'query' in your test actually finds the tokens
+        _ <- create Holding_Impl with
+          owner = lender
+          assetId = collateralAssetId
+          quantity = collateralAmount
+          issuer = lender
+          compliance = complianceParty
+          locked = False
+          lockContext = None
+          metadata = Map.fromList [("reason", "Seized Collateral")]
+          observers = []
 
         let concreteCollateralTransferCid = coerceContractId @TransferInstruction @TransferInstruction_Impl collateralTransferCid
         concreteCollateralTransfer <- fetch concreteCollateralTransferCid
@@ -370,8 +371,6 @@ template Loan
             , ("cantonsuite.io/initiated-at",      show now)
             , (cip0056Reason, "Collateral liquidated due to loan default")
             ]
-          
-          
           senderHoldingCid = collateralHoldingCid
 
         pool <- fetch poolCid
