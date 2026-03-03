@@ -1,4 +1,6 @@
+-- | Users - User profiles and roles
 module Users where
+
 import Types
 
 template User
@@ -9,3 +11,13 @@ template User
     role    : Role
   where
     signatory partyId
+    
+    choice UpdateProfile : ContractId User
+      with
+        newName  : Text
+        newEmail : Text
+      controller partyId
+      do
+        create this with
+          name = newName
+          email = newEmail

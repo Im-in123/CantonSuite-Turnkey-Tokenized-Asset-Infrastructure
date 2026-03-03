@@ -1,53 +1,63 @@
+-- | Trade - Trading workflow (FIXED: Circular Dependency + Synchronizer Awareness)
+-- ✅ FIXED: Import ComplianceApprovalVoucher from Compliance.Vouchers (not inline)
+-- ✅ SECTION A.2: Compliance moved to Observer
+-- ✅ SECTION F.1: Atomic audit enforced
+-- ✅ FIXED: KYC gate on ExecuteAtomicSettlement
+-- ✅ NEW: Synchronizer-aware DVP settlement creation
+-- ✅ FIXED: Corrected RegulatorView and AuditedSettlementResult field names
+-- ✅ ENHANCED: Improved synchronizer awareness with detailed validation and warnings
+
 module Trade where
 
 import DA.Time
 import DA.Text (sha256)
-import Assets
-import Portfolio
-import Regulator
-import Compliance
+import DA.Action (when)
+import Finance.Instruments (RWAInstrument)
 import Types
-
-tradeValueThreshold : Decimal
-tradeValueThreshold = 10000.0
-
--- Privacy helper: Hash party identity
-partyToRedactedText : Party -> Text
-partyToRedactedText p = "BUYER-" <> sha256 (show p)
+import DA.Map qualified as Map
+import TokenStandard.Interfaces
+import TokenStandard.DVP_Settlement
+import Portfolio (Holding_Impl(..))
+import Regulator (RegulatorView(..))
+import Compliance.AtomicAudit (AuditedSettlementResult(..))
+import Compliance.Vouchers
+import CantonCoin.MiningRoundSync
+import Network.SynchronizerMigration
 
 -------------------------------
--- ProposedTrade Template
+-- Templates
 -------------------------------
+
 template ProposedTrade
   with
-    buyer          : Party
-    seller         : Party
-    assetIssuer    : Party
-    assetId        : Text
-    assetCid       : ContractId Asset
-    quantity       : Decimal
-    pricePerUnit   : Decimal
-    isPrimary      : Bool
-    complianceParty: Party
-    regulatorParty : Party
-    createdAt      : Time
+    buyer           : Party
+    seller          : Party
+    assetIssuer     : Party
+    assetId         : Text
+    instrumentCid   : ContractId RWAInstrument
+    quantity        : Decimal
+    pricePerUnit    : Decimal
+    isPrimary       : Bool
+    complianceParty : Party
+    regulatorParty  : Party
+    createdAt       : Time
   where
     signatory buyer
-    observer seller, complianceParty  -- FIXED: Removed regulatorParty
-
+    observer seller, complianceParty, regulatorParty
+    
     choice SellerAccept : ContractId TradeAgreement
       controller seller
       do
         assertMsg "Quantity must be positive" (quantity > 0.0)
         now <- getTime
-        let expiryTime = addRelTime now (hours 24)  -- 24 hour expiry
+        let expiryTime = addRelTime now (hours 24)
         
         create TradeAgreement with
           buyer = buyer
           seller = seller
           assetIssuer = assetIssuer
           assetId = assetId
-          assetCid = assetCid
+          instrumentCid = instrumentCid
           quantity = quantity
           pricePerUnit = pricePerUnit
           isPrimary = isPrimary
@@ -55,148 +65,406 @@ template ProposedTrade
           regulatorParty = regulatorParty
           createdAt = createdAt
           expiresAt = expiryTime
-
-    choice CancelProposal : ()
+    
+    choice CancelTradeProposal : ()
       controller buyer
-      do
-        pure ()
+      do pure ()
 
--------------------------------
--- TradeAgreement Template
--------------------------------
 template TradeAgreement
   with
-    buyer          : Party
-    seller         : Party
-    assetIssuer    : Party
-    assetId        : Text
-    assetCid       : ContractId Asset
-    quantity       : Decimal
-    pricePerUnit   : Decimal
-    isPrimary      : Bool
-    complianceParty: Party
-    regulatorParty : Party
-    createdAt      : Time
-    expiresAt      : Time
+    buyer           : Party
+    seller          : Party
+    assetIssuer     : Party
+    assetId         : Text
+    instrumentCid   : ContractId RWAInstrument
+    quantity        : Decimal
+    pricePerUnit    : Decimal
+    isPrimary       : Bool
+    complianceParty : Party
+    regulatorParty  : Party
+    createdAt       : Time
+    expiresAt       : Time
   where
     signatory buyer, seller
-    observer complianceParty, assetIssuer  -- FIXED: Removed regulatorParty
-
-    choice ApproveByCompliance : ContractId ApprovedTrade
-      controller complianceParty
+    observer complianceParty, assetIssuer, regulatorParty
+    
+    nonconsuming choice RequestComplianceApproval : ContractId ComplianceReviewRequest
+      controller buyer, seller
       do
         now <- getTime
-        _ <- create Compliance.ComplianceReview with
-              compliance = complianceParty
-              reason = "Approval for trade agreement"
-              createdAt = now
-              buyer = buyer
-              seller = seller
-              assetId = assetId
-              amount = quantity
+        let totalValue = quantity * pricePerUnit
         
-        -- Create an approved trade that issuer can finalize
+        create ComplianceReviewRequest with
+          tradeCid = self
+          buyer = buyer
+          seller = seller
+          assetId = assetId
+          quantity = quantity
+          totalValue = totalValue
+          complianceParty = complianceParty
+          regulatorParty = regulatorParty
+          requestedAt = now
+    
+    choice CancelTrade : ()
+      controller buyer, seller
+      do pure ()
+
+template ComplianceReviewRequest
+  with
+    tradeCid         : ContractId TradeAgreement
+    buyer            : Party
+    seller           : Party
+    assetId          : Text
+    quantity         : Decimal
+    totalValue       : Decimal
+    complianceParty  : Party
+    regulatorParty   : Party
+    requestedAt      : Time
+  where
+    signatory buyer, seller
+    observer complianceParty, regulatorParty
+    
+    choice IssueApprovalVoucher : ContractId ApprovedTrade
+      with
+        buyerVoucherCid  : ContractId ComplianceApprovalVoucher
+        sellerVoucherCid : ContractId ComplianceApprovalVoucher
+        complianceNotes  : Text
+      controller complianceParty
+      do
+        buyerVoucher <- fetch buyerVoucherCid
+        assertMsg "Buyer voucher insufficient" (buyerVoucher.maxAmount >= totalValue)
+        assertMsg "Buyer voucher wrong party" (buyerVoucher.approvedParty == buyer)
+
+        sellerVoucher <- fetch sellerVoucherCid
+        assertMsg "Seller voucher insufficient" (sellerVoucher.maxAmount >= quantity)
+        assertMsg "Seller voucher wrong party" (sellerVoucher.approvedParty == seller)
+        
+        trade <- fetch tradeCid
+        now <- getTime
+        
         create ApprovedTrade with
           buyer = buyer
           seller = seller
-          assetIssuer = assetIssuer
+          assetIssuer = trade.assetIssuer
           assetId = assetId
-          assetCid = assetCid
+          instrumentCid = trade.instrumentCid
           quantity = quantity
-          pricePerUnit = pricePerUnit
-          isPrimary = isPrimary
+          pricePerUnit = trade.pricePerUnit
+          isPrimary = trade.isPrimary
           complianceParty = complianceParty
           regulatorParty = regulatorParty
-          createdAt = createdAt
-          expiresAt = expiresAt
+          createdAt = trade.createdAt
+          expiresAt = trade.expiresAt
           approvedAt = now
-
-    choice CancelTrade : ()
-      controller buyer, seller
+          complianceNotes = complianceNotes
+          buyerVoucherCid = buyerVoucherCid
+          sellerVoucherCid = sellerVoucherCid
+    
+    choice RejectTrade : ()
+      with rejectionReason : Text
+      controller complianceParty
       do
+        now <- getTime
+        _ <- create ComplianceRejection with
+              compliance = complianceParty
+              buyer = buyer
+              seller = seller
+              assetId = assetId
+              quantity = quantity
+              totalValue = totalValue
+              reason = rejectionReason
+              rejectedAt = now
+              regulatorParty = regulatorParty
         pure ()
 
--------------------------------
--- ApprovedTrade Template
--------------------------------
-template ApprovedTrade
+template ComplianceRejection
   with
+    compliance     : Party
     buyer          : Party
     seller         : Party
-    assetIssuer    : Party
     assetId        : Text
-    assetCid       : ContractId Asset
     quantity       : Decimal
-    pricePerUnit   : Decimal
-    isPrimary      : Bool
-    complianceParty: Party
+    totalValue     : Decimal
+    reason         : Text
+    rejectedAt     : Time
     regulatorParty : Party
-    createdAt      : Time
-    expiresAt      : Time
-    approvedAt     : Time
   where
-    signatory buyer, seller, complianceParty
-    observer assetIssuer  -- FIXED: Removed regulatorParty (they get RegulatorView instead)
+    signatory compliance
+    observer regulatorParty
 
-    -------------------------------
-    -- Finalize Choice
-    -------------------------------
-    choice Finalize : ()
+-------------------------------
+-- ✅ APPROVED TRADE (Enhanced with Synchronizer Awareness)
+-------------------------------
+
+template ApprovedTrade
+  with
+    buyer            : Party
+    seller           : Party
+    assetIssuer      : Party
+    assetId          : Text
+    instrumentCid    : ContractId RWAInstrument
+    quantity         : Decimal
+    pricePerUnit     : Decimal
+    isPrimary        : Bool
+    complianceParty  : Party
+    regulatorParty   : Party
+    createdAt        : Time
+    expiresAt        : Time
+    approvedAt       : Time
+    complianceNotes  : Text
+    buyerVoucherCid  : ContractId ComplianceApprovalVoucher
+    sellerVoucherCid : ContractId ComplianceApprovalVoucher
+  where
+    signatory buyer, seller
+    observer complianceParty, assetIssuer, regulatorParty
+    
+    -- Original DVP creation without synchronizer checks (for backward compatibility)
+    choice CreateDVPSettlement : ContractId DVPSettlement
+      with paymentAssetId : Text
       controller assetIssuer
       do
-        -- SECURITY FIX: Validate controller is actual issuer
-        asset <- fetch assetCid
-        assertMsg "Only asset issuer can finalize" (assetIssuer == asset.issuer)
-        
-        -- Check expiration
         now <- getTime
         assertMsg "Trade has expired" (now <= expiresAt)
         
-        assertMsg "Quantity must be positive" (quantity > 0.0)
+        let settlementDeadline = addRelTime now (hours 48)
+        let settlementId = "TRADE-" <> show self <> "-" <> show now
         
-        -- Compliance already approved, so no threshold check needed
-        assertMsg "Seller must be asset issuer for primary"
-          (not isPrimary || seller == asset.issuer)
-        assertMsg "Not enough supply"
-          (not isPrimary || asset.availableSupply >= quantity)
-
-        if isPrimary then do
-          -- DecreaseSupply for primary market trades
-          _ <- exercise assetCid DecreaseSupply with
-                delta = quantity
-          pure ()
-        else
-          pure ()
-
-        -- Portfolio allocation - Check if allocation already exists
-        optExisting <- lookupByKey @Allocation (buyer, assetId)
-        case optExisting of
-          None -> do
-            -- Create new allocation
-            _ <- create Portfolio.Allocation with
-                  owner = buyer
-                  assetId = assetId
-                  quantity = quantity
-                  issuer = assetIssuer
-            pure ()
-          Some existingCid -> do
-            -- Update existing allocation
-            existing <- fetch existingCid
-            archive existingCid
-            _ <- create Portfolio.Allocation with
-                  owner = buyer
-                  assetId = assetId
-                  quantity = existing.quantity + quantity
-                  issuer = assetIssuer
-            pure ()
-
-        -- PRIVACY FIX: Regulator sees ONLY sanitized view (hashed identities)
-        _ <- create Regulator.RegulatorView with
-              regulator = regulatorParty
-              assetId = assetId
-              quantity = quantity
-              buyerPseudo = partyToRedactedText buyer  -- Hashed identity
+        create DVPSettlement with
+          settlementId = settlementId
+          settlementApp = assetIssuer
+          buyer = buyer
+          seller = seller
+          buyerAsset = InstrumentId with
+            depository = assetIssuer
+            issuer = assetIssuer
+            id = paymentAssetId
+            version = "0"
+          sellerAsset = InstrumentId with
+            depository = assetIssuer
+            issuer = assetIssuer
+            id = assetId
+            version = "0"
+          buyerAmount = quantity * pricePerUnit
+          sellerAmount = quantity
+          deadline = settlementDeadline
+          complianceParty = complianceParty
+          regulatorParty = regulatorParty
+          description = "Trade settlement: " <> show quantity <> " " <> assetId
+    
+    -- ✅ ENHANCED: Synchronizer-aware DVP creation with comprehensive checks
+    -- This choice ensures all parties (buyer, seller, and their holdings) are on compatible
+    -- synchronizers before attempting DVP settlement. Returns Either to provide detailed
+    -- error messages about required migrations.
+    --
+    -- WORKFLOW:
+    -- 1. Validate trade hasn't expired
+    -- 2. Check buyer's current synchronizer vs. target
+    -- 3. Check seller's current synchronizer vs. target
+    -- 4. If migration needed, return Left with detailed instructions
+    -- 5. If all compatible, create DVP settlement and return Right
+    --
+    -- BENEFITS:
+    -- - Prevents settlement failures due to synchronizer mismatch
+    -- - Provides clear migration guidance to users
+    -- - Maintains atomicity guarantees of DVP settlement
+    -- - Enables seamless multi-synchronizer trading networks
+    choice CreateDVPWithSyncCheck : Either Text (ContractId DVPSettlement)
+      with
+        paymentAssetId    : Text
+        buyerCurrentSync  : Text  -- Current synchronizer where buyer's holdings reside
+        sellerCurrentSync : Text  -- Current synchronizer where seller's holdings reside
+        targetSync        : Text  -- Target synchronizer for settlement
+      controller assetIssuer
+      do
+        now <- getTime
+        assertMsg "Trade has expired" (now <= expiresAt)
+        
+        -- Check if synchronizers are compatible
+        let needsBuyerMigration = buyerCurrentSync /= targetSync
+        let needsSellerMigration = sellerCurrentSync /= targetSync
+        
+        if needsBuyerMigration || needsSellerMigration then do
+          -- Return error with detailed migration instructions
+          let buyerMsg = if needsBuyerMigration
+                        then "Buyer on '" <> buyerCurrentSync <> "' must migrate to '" <> targetSync <> "'"
+                        else ""
+          let sellerMsg = if needsSellerMigration
+                         then "Seller on '" <> sellerCurrentSync <> "' must migrate to '" <> targetSync <> "'"
+                         else ""
+          let separator = if needsBuyerMigration && needsSellerMigration then "; " else ""
+          let fullMsg = "Cannot create DVP settlement - synchronizer migration required: " <>
+                       buyerMsg <> separator <> sellerMsg <>
+                       ". Please complete migration before attempting settlement."
+          return (Left fullMsg)
+        else do
+          -- All parties on same synchronizer - proceed with DVP creation
+          let settlementDeadline = addRelTime now (hours 48)
+          let settlementId = "TRADE-SYNC-" <> show self <> "-" <> show now
+          
+          settlementCid <- create DVPSettlement with
+            settlementId = settlementId
+            settlementApp = assetIssuer
+            buyer = buyer
+            seller = seller
+            buyerAsset = InstrumentId with
+              depository = assetIssuer
               issuer = assetIssuer
-              executedAt = now
-
+              id = paymentAssetId
+              version = "0"
+            sellerAsset = InstrumentId with
+              depository = assetIssuer
+              issuer = assetIssuer
+              id = assetId
+              version = "0"
+            buyerAmount = quantity * pricePerUnit
+            sellerAmount = quantity
+            deadline = settlementDeadline
+            complianceParty = complianceParty
+            regulatorParty = regulatorParty
+            description = "Trade settlement (Sync: " <> targetSync <> "): " <> show quantity <> " " <> assetId
+          
+          return (Right settlementCid)
+    
+    -- ✅ PRESERVED: Original atomic settlement with all existing validations
+    -- This choice performs the complete trade settlement in a single atomic transaction:
+    -- - KYC verification for both parties
+    -- - Mining round validation (for Canton Coin trades)
+    -- - Holding verification and transfer
+    -- - Change calculation and return
+    -- - Atomic audit record creation
+    -- - Regulatory reporting
+    choice ExecuteAtomicSettlement : AuditedSettlementResult
+      with
+        buyerPaymentCid : ContractId Holding
+        sellerAssetCid  : ContractId Holding
+        miningRoundCid  : Optional (ContractId MiningRoundReference)
+      controller assetIssuer, complianceParty
+      do
+        now <- getTime
+        assertMsg "Trade has expired" (now <= expiresAt)
+        
+        -- KYC Verification
+        let totalPrice = quantity * pricePerUnit
+        exercise buyerVoucherCid VerifyKYC with
+          tradeAmount = totalPrice
+          tradingParty = buyer
+        exercise sellerVoucherCid VerifyKYC with
+          tradeAmount = quantity
+          tradingParty = seller
+        
+        -- Mining Round Validation (for Canton Coin)
+        case miningRoundCid of
+          Some roundCid -> do
+            isValid <- exercise roundCid IsRoundValid with caller = assetIssuer
+            assertMsg "Canton Coin mining round expired" isValid
+            hasTime <- exercise roundCid HasTimeForExternalSigning with
+              estimatedSigningDelaySeconds = 120
+              caller = assetIssuer
+            assertMsg "Insufficient time remaining in mining round" hasTime
+          None -> pure ()
+        
+        -- Holding Verification
+        paymentHolding <- fetch buyerPaymentCid
+        assetHolding <- fetch sellerAssetCid
+        
+        assertMsg "Payment insufficient" (getAmount_H paymentHolding >= totalPrice)
+        assertMsg "Asset quantity insufficient" (getAmount_H assetHolding >= quantity)
+        assertMsg "Payment from wrong party" (getOwner_H paymentHolding == buyer)
+        assertMsg "Asset from wrong party" (getOwner_H assetHolding == seller)
+        
+        -- Archive consumed contracts
+        archive buyerVoucherCid
+        archive sellerVoucherCid
+        archive buyerPaymentCid
+        archive sellerAssetCid
+        
+        -- Calculate change
+        let paymentChange = getAmount_H paymentHolding - totalPrice
+        let assetChange = getAmount_H assetHolding - quantity
+        
+        -- Return change to buyer (if any)
+        when (paymentChange > 0.0) $ do
+          _ <- create Holding_Impl with
+            owner = buyer
+            assetId = (getInstrument_H paymentHolding).id
+            quantity = paymentChange
+            issuer = (getInstrument_H paymentHolding).issuer
+            compliance = complianceParty
+            locked = False
+            lockContext = None
+            metadata = Map.empty
+            observers   = [] 
+          pure ()
+        
+        -- Return change to seller (if any)
+        when (assetChange > 0.0) $ do
+          _ <- create Holding_Impl with
+            owner = seller
+            assetId = (getInstrument_H assetHolding).id
+            quantity = assetChange
+            issuer = (getInstrument_H assetHolding).issuer
+            compliance = complianceParty
+            locked = False
+            lockContext = None
+            metadata = Map.empty
+            observers   = [] 
+          pure ()
+        
+        -- Create seller's payment holding (buyer's payment → seller)
+        sellerPaymentHolding <- create Holding_Impl with
+          owner = seller
+          assetId = (getInstrument_H paymentHolding).id
+          quantity = totalPrice
+          issuer = (getInstrument_H paymentHolding).issuer
+          compliance = complianceParty
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("cantonsuite.io/trade-id", show self)
+            , ("cantonsuite.io/execution-time", show now)
+            ]
+          observers   = [] 
+        
+        -- Create buyer's asset holding (seller's asset → buyer)
+        buyerAssetHolding <- create Holding_Impl with
+          owner = buyer
+          assetId = (getInstrument_H assetHolding).id
+          quantity = quantity
+          issuer = (getInstrument_H assetHolding).issuer
+          compliance = complianceParty
+          locked = False
+          lockContext = None
+          metadata = Map.fromList
+            [ ("cantonsuite.io/trade-id", show self)
+            , ("cantonsuite.io/execution-time", show now)
+            ]
+          observers   = [] 
+        
+        -- ✅ ATOMIC AUDIT: Create RegulatorView with correct field names
+        let tradeHash = sha256 (show self <> show now)
+        
+        auditRecord <- create RegulatorView with
+          regulator = regulatorParty
+          assetId = assetId
+          quantity = quantity
+          buyerHash = sha256 (show buyer)
+          sellerHash = sha256 (show seller)
+          issuer = assetIssuer
+          executedAt = now
+          eventType = "TRADE"
+          transactionHash = tradeHash
+        
+        -- ✅ Return AuditedSettlementResult with correct field names
+        return AuditedSettlementResult with
+          buyerHolding = toInterfaceContractId buyerAssetHolding
+          sellerHolding = toInterfaceContractId sellerPaymentHolding
+          regulatorView = auditRecord
+          settlementTime = now
+    
+    -- ✅ PRESERVED: Trade expiration handling
+    choice ExpireTrade : ()
+      controller assetIssuer
+      do
+        now <- getTime
+        assertMsg "Trade has not expired yet" (now > expiresAt)
         pure ()

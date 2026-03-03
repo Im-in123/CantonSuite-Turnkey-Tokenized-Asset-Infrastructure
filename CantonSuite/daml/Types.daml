@@ -1,3 +1,4 @@
+-- | Types - Global data types and enums
 module Types where
 
 data Role = Issuer | Buyer | Compliance | Regulator

@@ -1,25 +1,42 @@
-# for config file options, refer to
-# https://docs.daml.com/tools/assistant.html#project-config-file-daml-yaml
-
-sdk-version: 2.10.2
+sdk-version: 2.10.0
 name: CantonSuite
 source: daml
-version: 0.0.1
-init-script: Scripts.MultiPartySetup:setup
+version: 0.1.0
+#init-script: Scripts.DemoDataSetup:demoSetup
+init-script: Scripts.StartupScript:runCompleteStartupDemo
+
+
 dependencies:
   - daml-prim
   - daml-script-lts
   - daml-stdlib
-  #  - daml-script
-data-dependencies: []
- 
+  
+  # DAML Finance Interface packages
+  - lib/daml-finance-interface-types-common-v3-3.0.0.dar
+  - lib/daml-finance-interface-types-date-v3-3.0.0.dar
+  - lib/daml-finance-interface-account-v4-4.0.0.dar
+  - lib/daml-finance-interface-holding-v4-4.0.0.dar
+  - lib/daml-finance-interface-instrument-base-v4-4.0.0.dar
+  - lib/daml-finance-interface-instrument-types-v2-2.0.0.dar
+  - lib/daml-finance-interface-instrument-token-v4-4.0.0.dar
+  - lib/daml-finance-interface-settlement-v4-4.0.0.dar
+  - lib/daml-finance-interface-lifecycle-v4-4.0.0.dar
+  - lib/daml-finance-interface-util-v3-3.0.0.dar
+  - lib/daml-finance-interface-data-v4-4.0.0.dar
+  
+  # DAML Finance Implementation packages
+  - lib/daml-finance-account-v4-4.0.0.dar
+  - lib/daml-finance-holding-v4-4.0.0.dar
+  - lib/daml-finance-data-v4-4.0.0.dar
+  - lib/daml-finance-util-v4-4.0.0.dar
+  - lib/daml-finance-lifecycle-v4-4.0.0.dar
+  - lib/daml-finance-settlement-v4-4.0.0.dar
+  - lib/daml-finance-instrument-token-v4-4.0.0.dar
 
-# Navigator configuration
+data-dependencies: []
+
 start-navigator: no
  
 build-options:
   - --target=1.17
   - -Wno-upgrade-interfaces
-  - -Wno-upgrade-exceptions
-
-

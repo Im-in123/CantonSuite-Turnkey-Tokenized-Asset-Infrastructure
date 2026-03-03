@@ -1,7 +1,13 @@
+-- | KYC - Know Your Customer workflow (FIXED: Import voucher from new module)
+-- ✅ SECTION A.2: Auto-generates ComplianceApprovalVoucher on approval
+-- ✅ FIXED: Import from Compliance.Vouchers
+
 module KYC where
 
 import Types
-import DA.Time()
+import DA.Time
+import Compliance.Vouchers  -- ✅ FIXED: Import entire module
+import DA.List (head)
 
 template KYC
   with
@@ -12,16 +18,210 @@ template KYC
     signatory buyer
     observer compliance
 
-    choice Approve : ContractId KYC
+    choice Approve : (ContractId KYC, ContractId ComplianceApprovalVoucher)
+      with
+        approvalReason  : Text
+        maxTradeAmount  : Decimal
+        voucherDuration : Int
       controller compliance
       do
-        newCid <- create this with status = KApproved
+        now <- getTime
+        
+        newKYC <- create this with status = KApproved
+        
+        voucher <- create ComplianceApprovalVoucher with
+          compliance = compliance
+          approvedParty = buyer
+          assetId = "*"
+          maxAmount = maxTradeAmount
+          expiresAt = addRelTime now (days voucherDuration)
+          approvalReason = approvalReason
+          restrictions = []
+        
+        return (newKYC, voucher)
     
-        pure newCid
-
-    choice Reject : ContractId KYC
+    choice ApproveWithRestrictions : (ContractId KYC, ContractId ComplianceApprovalVoucher)
+      with
+        approvalReason  : Text
+        maxTradeAmount  : Decimal
+        voucherDuration : Int
+        assetRestrictions : [Text]
+        otherRestrictions : [Text]
       controller compliance
       do
-        newCid <- create this with status = KRejected
-        -- archive self (Removed)
-        pure newCid
+        now <- getTime
+        
+        newKYC <- create this with status = KApproved
+        
+        voucher <- create ComplianceApprovalVoucher with
+          compliance = compliance
+          approvedParty = buyer
+          assetId = if null assetRestrictions then "*" else head assetRestrictions
+          maxAmount = maxTradeAmount
+          expiresAt = addRelTime now (days voucherDuration)
+          approvalReason = approvalReason
+          restrictions = otherRestrictions
+        
+        return (newKYC, voucher)
+    
+    choice Reject : ContractId KYC
+      with rejectionReason : Text
+      controller compliance
+      do
+        create this with status = KRejected
+    
+    choice RequestReview : ContractId KYC
+      controller buyer
+      do
+        assertMsg "Can only request review if rejected" (status == KRejected)
+        create this with status = KPending
+
+template KYCWithAutoRenewal
+  with
+    buyer             : Party
+    compliance        : Party
+    status            : KYCStatus
+    maxTradeAmount    : Decimal
+    autoRenewVouchers : Bool
+    renewalPeriodDays : Int
+  where
+    signatory buyer, compliance
+    
+    ensure maxTradeAmount > 0.0 && renewalPeriodDays > 0
+    
+    nonconsuming choice RenewVoucher : ContractId ComplianceApprovalVoucher
+      controller compliance
+      do
+        assertMsg "KYC must be approved" (status == KApproved)
+        assertMsg "Auto-renewal not enabled" autoRenewVouchers
+        
+        now <- getTime
+        
+        create ComplianceApprovalVoucher with
+          compliance = compliance
+          approvedParty = buyer
+          assetId = "*"
+          maxAmount = maxTradeAmount
+          expiresAt = addRelTime now (days renewalPeriodDays)
+          approvalReason = "Auto-renewed KYC voucher"
+          restrictions = []
+    
+    choice UpdateTradingLimit : ContractId KYCWithAutoRenewal
+      with newMaxAmount : Decimal
+      controller compliance
+      do
+        assertMsg "Amount must be positive" (newMaxAmount > 0.0)
+        archive self
+        create this with maxTradeAmount = newMaxAmount
+    
+    choice RevokeKYC : ContractId KYCWithAutoRenewal
+      with revocationReason : Text
+      controller compliance
+      do
+        archive self
+        create this with 
+          status = KRejected
+          autoRenewVouchers = False
+
+template VoucherRequest
+  with
+    requester     : Party
+    compliance    : Party
+    assetId       : Text
+    requestedAmount : Decimal
+    reason        : Text
+    requestedAt   : Time
+  where
+    signatory requester
+    observer compliance
+    
+    ensure requestedAmount > 0.0
+    
+    choice ApproveVoucherRequest : ContractId ComplianceApprovalVoucher
+      with
+        approvedAmount  : Decimal
+        voucherDuration : Int
+      controller compliance
+      do
+        now <- getTime
+        assertMsg "Approved amount cannot exceed requested" (approvedAmount <= requestedAmount)
+        
+        create ComplianceApprovalVoucher with
+          compliance = compliance
+          approvedParty = requester
+          assetId = assetId
+          maxAmount = approvedAmount
+          expiresAt = addRelTime now (days voucherDuration)
+          approvalReason = "Voucher request approved: " <> reason
+          restrictions = []
+    
+    choice RejectVoucherRequest : ()
+      with rejectionReason : Text
+      controller compliance
+      do pure ()
+
+template BatchVoucherIssuance
+  with
+    compliance      : Party
+    approvedParties : [Party]
+    defaultAmount   : Decimal
+    defaultDuration : Int
+    reason          : Text
+  where
+    signatory compliance
+    
+    ensure defaultAmount > 0.0 && defaultDuration > 0
+    
+    choice IssueBatchVouchers : [ContractId ComplianceApprovalVoucher]
+      controller compliance
+      do
+        now <- getTime
+        
+        forA approvedParties $ \party -> do
+          create ComplianceApprovalVoucher with
+            compliance = compliance
+            approvedParty = party
+            assetId = "*"
+            maxAmount = defaultAmount
+            expiresAt = addRelTime now (days defaultDuration)
+            approvalReason = reason
+            restrictions = []
+
+template ComplianceDashboard
+  with
+    compliance        : Party
+    totalKYCApproved  : Int
+    totalKYCPending   : Int
+    totalKYCRejected  : Int
+    activeVouchers    : Int
+    expiredVouchers   : Int
+  where
+    signatory compliance
+    
+    nonconsuming choice GetKYCStats : KYCStats
+      controller compliance
+      do
+        let totalKYC = totalKYCApproved + totalKYCPending + totalKYCRejected
+        let approvalRate = if totalKYC == 0
+                          then 0.0
+                          else (intToDecimal totalKYCApproved / intToDecimal totalKYC) * 100.0
+        
+        return KYCStats with
+          totalKYC = totalKYC
+          approved = totalKYCApproved
+          pending = totalKYCPending
+          rejected = totalKYCRejected
+          approvalRate = approvalRate
+          activeVouchers = activeVouchers
+          expiredVouchers = expiredVouchers
+
+data KYCStats = KYCStats
+  with
+    totalKYC        : Int
+    approved        : Int
+    pending         : Int
+    rejected        : Int
+    approvalRate    : Decimal
+    activeVouchers  : Int
+    expiredVouchers : Int
+  deriving (Eq, Show)

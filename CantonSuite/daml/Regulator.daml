@@ -1,13 +1,183 @@
-module Regulator where
+-- | Regulator - Privacy-Preserving Audit Views (REFACTORED)
+-- ✅ SECTION A.4: SHA-256 Hashed Identifiers (GDPR/Privacy Protection)
+-- ✅ FIXED: Added (..) to export RegulatorView constructor
+
+module Regulator
+  ( RegulatorView(..)  -- ✅ FIXED: Export the constructor
+  , SolvencyAuditView(..)
+  , RiskThresholdBreach(..)
+  , AMLAlert(..)
+  , ComplianceAuditTrail(..)
+  , createHashedRegulatorView
+  , recordTradeForRegulator
+  , recordTransferForRegulator
+  , recordMintForRegulator
+  , recordBurnForRegulator
+  ) where
+
+import DA.Text (sha256)
+
+-------------------------------
+-- ✅ SECTION A.4: PRIVACY-PRESERVING REGULATOR VIEW
+-------------------------------
 
 template RegulatorView
   with
-    regulator   : Party
-    assetId     : Text
-    quantity    : Decimal
-    buyerPseudo : Text
-    issuer      : Party
-    executedAt  : Time
+    regulator      : Party
+    assetId        : Text
+    quantity       : Decimal
+    buyerHash      : Text
+    sellerHash     : Text
+    issuer         : Party
+    executedAt     : Time
+    eventType      : Text
+    transactionHash: Text
   where
-    signatory issuer      -- Only issuer signs
-    observer regulator    -- Regulator observes
+    signatory issuer
+    observer regulator
+
+-------------------------------
+-- ✅ HELPER: Create Hashed Regulator View
+-------------------------------
+
+createHashedRegulatorView : Party -> Party -> Party -> Party -> Text -> Decimal -> Text -> Time -> Update (ContractId RegulatorView)
+createHashedRegulatorView issuer regulator buyer seller assetId quantity eventType executedAt = do
+  let buyerHash = sha256 (show buyer)
+  let sellerHash = sha256 (show seller)
+  let txHash = sha256 (show buyer <> show seller <> show quantity <> show executedAt)
+  
+  create RegulatorView with
+    regulator = regulator
+    assetId = assetId
+    quantity = quantity
+    buyerHash = buyerHash
+    sellerHash = sellerHash
+    issuer = issuer
+    executedAt = executedAt
+    eventType = eventType
+    transactionHash = txHash
+
+-------------------------------
+-- ✅ SOLVENCY AUDIT VIEW
+-------------------------------
+
+template SolvencyAuditView
+  with
+    regulator       : Party
+    issuer          : Party
+    assetId         : Text
+    totalMinted     : Decimal
+    totalBurned     : Decimal
+    circulatingSupply : Decimal
+    reportDate      : Time
+    userCountHash   : Text
+  where
+    signatory issuer
+    observer regulator
+    
+    ensure circulatingSupply >= 0.0
+
+-------------------------------
+-- ✅ RISK THRESHOLD BREACH VIEW
+-------------------------------
+
+template RiskThresholdBreach
+  with
+    regulator        : Party
+    issuer           : Party
+    breachType       : Text
+    assetId          : Text
+    thresholdValue   : Decimal
+    actualValue      : Decimal
+    affectedPartyHash: Text
+    breachTime       : Time
+    severity         : Text
+  where
+    signatory issuer
+    observer regulator
+    
+    ensure actualValue > thresholdValue
+
+-------------------------------
+-- ✅ ANTI-MONEY LAUNDERING (AML) ALERT
+-------------------------------
+
+template AMLAlert
+  with
+    regulator          : Party
+    issuer             : Party
+    alertId            : Text
+    suspiciousPartyHash: Text
+    activityPattern    : Text
+    totalAmount        : Decimal
+    transactionCount   : Int
+    timeWindow         : Text
+    detectedAt         : Time
+    riskScore          : Decimal
+  where
+    signatory issuer
+    observer regulator
+    
+    ensure riskScore >= 0.0 && riskScore <= 100.0
+
+-------------------------------
+-- ✅ COMPLIANCE AUDIT TRAIL
+-------------------------------
+
+template ComplianceAuditTrail
+  with
+    regulator         : Party
+    compliance        : Party
+    actionType        : Text
+    affectedPartyHash : Text
+    assetId           : Optional Text
+    actionReason      : Text
+    officerIdHash     : Text
+    actionTime        : Time
+  where
+    signatory compliance
+    observer regulator
+
+-------------------------------
+-- ✅ PRIVACY-PRESERVING QUERY HELPERS
+-------------------------------
+
+recordTradeForRegulator : Party -> Party -> Party -> Party -> Text -> Decimal -> Time -> Update (ContractId RegulatorView)
+recordTradeForRegulator issuer regulator buyer seller assetId quantity executedAt =
+  createHashedRegulatorView issuer regulator buyer seller assetId quantity "TRADE" executedAt
+
+recordTransferForRegulator : Party -> Party -> Party -> Party -> Text -> Decimal -> Time -> Update (ContractId RegulatorView)
+recordTransferForRegulator issuer regulator sender receiver assetId quantity executedAt =
+  createHashedRegulatorView issuer regulator sender receiver assetId quantity "TRANSFER" executedAt
+
+recordMintForRegulator : Party -> Party -> Party -> Text -> Decimal -> Time -> Update (ContractId RegulatorView)
+recordMintForRegulator issuer regulator recipient assetId quantity executedAt = do
+  let recipientHash = sha256 (show recipient)
+  let txHash = sha256 (show recipient <> show quantity <> show executedAt)
+  
+  create RegulatorView with
+    regulator = regulator
+    assetId = assetId
+    quantity = quantity
+    buyerHash = recipientHash
+    sellerHash = "MINT-ORIGIN"
+    issuer = issuer
+    executedAt = executedAt
+    eventType = "MINT"
+    transactionHash = txHash
+
+recordBurnForRegulator : Party -> Party -> Party -> Text -> Decimal -> Time -> Update (ContractId RegulatorView)
+recordBurnForRegulator issuer regulator holder assetId quantity executedAt = do
+  let holderHash = sha256 (show holder)
+  let txHash = sha256 (show holder <> show quantity <> show executedAt)
+  
+  create RegulatorView with
+    regulator = regulator
+    assetId = assetId
+    quantity = quantity
+    buyerHash = "BURN-DESTINATION"
+    sellerHash = holderHash
+    issuer = issuer
+    executedAt = executedAt
+    eventType = "BURN"
+    transactionHash = txHash

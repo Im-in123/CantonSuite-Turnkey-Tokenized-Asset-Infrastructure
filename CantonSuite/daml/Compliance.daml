@@ -1,5 +1,5 @@
+-- | Compliance - Compliance review and audit
 module Compliance where
-
 
 template ComplianceReview
   with
@@ -12,3 +12,8 @@ template ComplianceReview
     amount     : Decimal
   where
     signatory compliance
+    observer buyer, seller
+    
+    choice ArchiveReview : ()
+      controller compliance
+      do pure ()

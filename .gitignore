@@ -18,10 +18,12 @@ node_modules/
 .daml/
 dist/
 build/
+.lib/
 *.dar
 *.log
 *.zip
 ui/src/daml
+CantonSuite/combine-daml.js
 # --- Large Media Files ---
 # Uncomment below if your demo video is too large (>100MB) and blocks the push
 # demo.mp4
