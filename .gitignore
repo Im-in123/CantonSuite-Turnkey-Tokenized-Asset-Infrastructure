@@ -24,6 +24,7 @@ build/
 *.zip
 ui/src/daml
 CantonSuite/combine-daml.js
+create-zip.js
 # --- Large Media Files ---
 # Uncomment below if your demo video is too large (>100MB) and blocks the push
 # demo.mp4
