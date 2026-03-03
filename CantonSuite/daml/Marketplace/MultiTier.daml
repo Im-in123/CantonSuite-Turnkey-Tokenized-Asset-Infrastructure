@@ -89,7 +89,9 @@ template PrivacyPreservingListing
 
     -- ✅ F.6: TIER 2 - Firm-Only Marketplace
     choice PublishToFirmMarketplace : ContractId FirmMarketplaceListing
-      with firmId : Text
+      with 
+        firmId : Text
+        observers : [Party]
       controller issuer
       do
         assertMsg "Wrong tier" (visibility.tier == FirmOnlyTier)
@@ -107,7 +109,7 @@ template PrivacyPreservingListing
           expiresAt       = expiresAt
           minimumPurchase = minimumPurchase
           compliance      = compliance
-          observers       = []
+          observers       = observers
 
     -- ✅ F.6: TIER 3 - Selected Investors (Whitelist)
     nonconsuming choice InviteSelectedInvestor : ContractId InvestorInvitation
