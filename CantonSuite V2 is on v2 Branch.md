@@ -2,7 +2,8 @@
 CantonSuite+ V2
  
 **NB: These Changes are being implemented on the v2 branch of this repository because it's incomplete and has breaking chnages**
-> 
+>
+> ---
 ### 1. Network Interoperability & Infrastructure
 * **Atomic Synchronizer Migration:** 3-step "Move" protocol (Lock-Migrate-Recreate) allowing assets to move atomically between private and global network segments.
 * **Mining Round Guards:** Pre-transaction countdown logic ensuring all Canton Coin settlements complete within the 10-minute validity window.
