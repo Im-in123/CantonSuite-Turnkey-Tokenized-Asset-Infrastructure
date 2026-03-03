@@ -11,3 +11,5 @@ logs/
 # --- Temporary/Cache ---
 .bsp/
 target/
+
+a.txt
