@@ -49,10 +49,11 @@ template GlobalPoolDiscovery
     expiresAt        : Time
     complianceParty  : Party
     discoveryService : Party
+    publicParty      : Party 
     observers        : [Party]  -- Known potential depositors/borrowers
   where
     signatory poolOperator
-    observer discoveryService :: observers
+    observer discoveryService :: publicParty :: observers
 
     ensure
       interestRate >= 0.0 &&

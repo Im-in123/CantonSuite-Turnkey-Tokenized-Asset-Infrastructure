@@ -1,9 +1,6 @@
--- | Scripts/StartupScript.daml
--- THE ULTIMATE MASTER DEMO (100% TIER COVERAGE)
--- ✅ FIXED: Triggered all 4 tiers for Marketplace and Lending
--- ✅ FIXED: Observer sets added to prevent "Contract Not Visible" errors
--- ✅ FIXED: exerciseCmd typo corrected in FOP handshake
--- ✅ FIXED: Tuple unpacking for ApplyWithdrawalEffect result
+-- | Scripts.StartupScript - 100% Tier Coverage Master Demo
+-- ✅ TIER COVERAGE: Marketplace (1,2,3,4) & Lending (1,2,3,4)
+-- ✅ PATTERN: Billboard Discovery (publicParty) for both Market & Lending
 
 module Scripts.StartupScript where
 
@@ -97,7 +94,6 @@ setupEcosystem = script do
   aliceUser <- submit alice $ createCmd U.User with partyId = alice, name = "Alice", email = "a@c.io", role = Buyer
   bobUser <- submit bob $ createCmd U.User with partyId = bob, name = "Bob", email = "b@c.io", role = Buyer
   
-  -- KYC for all primary participants
   _ <- submitMulti [alice, compliance] [] $ createCmd K.KYC with buyer = alice, compliance = compliance, status = KApproved
   _ <- submitMulti [charlie, compliance] [] $ createCmd K.KYC with buyer = charlie, compliance = compliance, status = KApproved
   _ <- submitMulti [bob, compliance] [] $ createCmd K.KYC with buyer = bob, compliance = compliance, status = KApproved
@@ -184,7 +180,7 @@ runMarketplaceDiscovery : SetupResult -> AssetResult -> Script ()
 runMarketplaceDiscovery setup assets = script do
   now <- getTime
   
-  -- ✅ TIER 1: GLOBAL (PUBLIC DISCOVERY)
+  -- ✅ TIER 1: GLOBAL TRIGGERED
   p1 <- submit setup.issuer $ createCmd MP.PrivacyPreservingListing with 
     listingId = "G-001"
     issuer = setup.issuer
@@ -210,7 +206,7 @@ runMarketplaceDiscovery setup assets = script do
       buyer = setup.alice
       desiredQuantity = 10.0
 
-  -- ✅ TIER 2: FIRM (MEMBERSHIP GATED)
+  -- ✅ TIER 2: FIRM TRIGGERED
   firmMembCid <- submit setup.issuer $ createCmd MP.FirmMembership with 
     firm = setup.issuer
     member = setup.charlie
@@ -235,7 +231,6 @@ runMarketplaceDiscovery setup assets = script do
       selectedInvestors = []
       directRecipient = None
 
-  -- Fix: Add Charlie to observers so he can fetch the contract
   firmListingCid <- submit setup.issuer $ exerciseCmd p2 MP.PublishToFirmMarketplace with 
     firmId = "VIP-FIRM-01"
     observers = [setup.charlie]
@@ -245,7 +240,7 @@ runMarketplaceDiscovery setup assets = script do
     desiredQuantity = 5.0
     membershipCid = firmMembCid
 
-  -- ✅ TIER 3: SELECTED (WHITELIST / INVITATION)
+  -- ✅ TIER 3: INVITED TRIGGERED
   p3 <- submit setup.issuer $ createCmd MP.PrivacyPreservingListing with 
     listingId = "S-001"
     issuer = setup.issuer
@@ -285,7 +280,7 @@ runMarketplaceDiscovery setup assets = script do
 runSettlementHandshake : SetupResult -> AssetResult -> Script (ContractId Holding)
 runSettlementHandshake setup assets = script do
   now <- getTime
-  -- ✅ TIER 4: BILATERAL (ONE-TO-ONE)
+  -- ✅ TIER 4: BILATERAL (MARKETPLACE) TRIGGERED
   clearanceCid <- submit setup.compliance $ exerciseCmd setup.sanctionsRegistry IssueClearance with 
     partyToCheck = setup.alice
     tradeId = "T-100"
@@ -370,16 +365,8 @@ runFOPHandshake setup aliceProp = script do
     approvalReason = "Move"
     restrictions = []
     
-  hndl <- submit setup.issuer $ createCmd TransferExecutionHandler with 
-    registry = setup.issuer
-    complianceParty = setup.compliance
-
-  execReq <- submitMulti [setup.issuer, setup.compliance] [] $ 
-    exerciseCmd hndl ExecuteTransfer with 
-      instructionCid = instCid
-      senderVoucherCid = vAlice
-
-  -- FIXED: exerciseCmd instead of exerciseReq
+  hndl <- submit setup.issuer $ createCmd TransferExecutionHandler with registry = setup.issuer, complianceParty = setup.compliance
+  execReq <- submitMulti [setup.issuer, setup.compliance] [] $ exerciseCmd hndl ExecuteTransfer with instructionCid = instCid, senderVoucherCid = vAlice
   _ <- submitMulti [setup.issuer, setup.bob] [] $ exerciseCmd execReq AcceptTransfer
   pure ()
 
@@ -387,7 +374,7 @@ runLendingOperations : SetupResult -> Script ()
 runLendingOperations setup = script do
   now <- getTime
 
-  -- ✅ TIER 1: GLOBAL (LENDING POOL)
+  -- ✅ TIER 1: GLOBAL (LENDING) TRIGGERED
   poolCid <- submit setup.bank $ createCmd LendingPool with 
     poolOperator = setup.bank
     complianceParty = setup.compliance
@@ -419,10 +406,25 @@ runLendingOperations setup = script do
     poolCid = poolAfterDep
     existingHoldingCid = None
     
-  -- FIXED: Unpack tuple (ContractId, Decimal)
   (poolAfterWithdrawal, _) <- submit setup.bank $ exerciseCmd wEff ApplyWithdrawalEffect
 
-  -- ✅ TIER 2: FIRM (LENDING)
+  -- ✅ NEW: BILLBOARD (PUBLIC) DISCOVERY TRIGGERED
+  _ <- submit setup.bank $ createCmd PD.GlobalPoolDiscovery with
+    listingId = "G-POOL-001"
+    poolOperator = setup.bank
+    poolCid = poolAfterWithdrawal
+    assetId = "USD"
+    interestRate = 5.0
+    minimumDeposit = 1.0
+    minimumBorrow = 1.0
+    createdAt = now
+    expiresAt = addRelTime now (days 30)
+    complianceParty = setup.compliance
+    discoveryService = setup.bank
+    publicParty = setup.publicMarket
+    observers = []
+
+  -- ✅ TIER 2: FIRM (LENDING) TRIGGERED
   _ <- submit setup.bank $ createCmd PD.FirmMembership with 
     firm = setup.bank
     member = setup.charlie
@@ -442,7 +444,7 @@ runLendingOperations setup = script do
     createdAt = now
     expiresAt = addRelTime now (days 30)
     complianceParty = setup.compliance
-    observers = [setup.charlie] -- Fix: Visibility for Charlie
+    observers = [setup.charlie]
 
   [(fmCid, _)] <- queryFilter @PD.FirmMembership setup.charlie (\m -> m.membershipId == "LENDING-VIP-01")
   
@@ -453,7 +455,7 @@ runLendingOperations setup = script do
     membershipCid = fmCid
     collateralOffered = None
 
-  -- ✅ TIER 3: INVITED (LENDING)
+  -- ✅ TIER 3: INVITED (LENDING) TRIGGERED
   invitation <- submit setup.bank $ createCmd PD.InvitedPoolParticipant with
     invitationId = "INV-001"
     poolOperator = setup.bank
@@ -475,7 +477,7 @@ runLendingOperations setup = script do
 
 runLendingRiskManagement : SetupResult -> AssetResult -> Script ()
 runLendingRiskManagement setup assets = script do
-  -- ✅ TIER 4: BILATERAL (LENDING)
+  -- ✅ TIER 4: BILATERAL (LENDING) TRIGGERED
   [(poolCid, _)] <- query @LendingPool setup.bank
   
   aliceCol <- submitMulti [setup.issuer, setup.alice] [] $ exerciseCmd assets.holdingFactory CreditHolding with 
