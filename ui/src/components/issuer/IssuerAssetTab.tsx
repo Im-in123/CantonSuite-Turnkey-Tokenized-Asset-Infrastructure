@@ -29,7 +29,7 @@ export default function IssuerAssetTab({
     
     // First filter for assets with proper structure, then apply search/filter
     const validAssets = assets.filter(a => {
-      const isValid = a.payload && a.payload.instrument && a.payload.instrument._1;
+      const isValid = a.payload && a.payload.name && a.payload.instrument;
       console.log('DEBUG: Asset validity check:', isValid, a.payload?.name);
       return isValid;
     });
@@ -38,7 +38,7 @@ export default function IssuerAssetTab({
     const finalFiltered = validAssets.filter(a => {
       const matchesSearch = 
         a.payload.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        a.payload.instrument._1._2.toLowerCase().includes(searchTerm.toLowerCase());
+        (a.payload.instrument && a.payload.instrument.id && a.payload.instrument.id._1 && a.payload.instrument.id._1.toLowerCase().includes(searchTerm.toLowerCase()));
       const matchesFilter = 
         fractionalFilter === "All" || 
         (fractionalFilter === "Fractionalized" ? a.payload.fractionalized : !a.payload.fractionalized);
@@ -96,9 +96,9 @@ export default function IssuerAssetTab({
           <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Price</th><th>Frac.</th><th>Actions</th></tr></thead>
           <tbody>
             {filteredAssets.length === 0 && <tr><td colSpan={6} className="text-muted">No assets found matching criteria.</td></tr>}
-            {filteredAssets.filter(a => a.payload && a.payload.instrument && a.payload.instrument._1).map(a => (
+            {filteredAssets.filter(a => a.payload && a.payload.name && a.payload.instrument).map(a => (
               <tr key={a.contractId}>
-                <td>{a.payload.instrument._1._2}</td>
+                <td>{a.payload.instrument && a.payload.instrument.id && a.payload.instrument.id._1 ? a.payload.instrument.id._1 : 'N/A'}</td>
                 <td>{a.payload.name}</td>
                 <td>{a.payload.assetType}</td>
                 <td>${Number(a.payload.pricePerUnit).toFixed(2)}</td>

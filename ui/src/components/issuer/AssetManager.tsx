@@ -36,7 +36,7 @@ export default function AssetManager() {
   const assetStats = useMemo(() => {
     const stats: Record<string, { inTreasury: number; totalSupply: number; treasuryCid: string | null }> = {};
     assets.forEach(a => { 
-      const instrumentId = a.payload.instrument && a.payload.instrument._1 ? a.payload.instrument._1._2 : 'unknown';
+      const instrumentId = a.payload.instrument && a.payload.instrument.id && a.payload.instrument.id._1 ? a.payload.instrument.id._1 : a.payload.name || 'unknown';
       stats[instrumentId] = { inTreasury: 0, totalSupply: 0, treasuryCid: null }; 
     });
     allHoldings.forEach(h => {
@@ -69,7 +69,7 @@ export default function AssetManager() {
       const auditContract = await ledger.create(AtomicMintWithAudit, {
         issuer: party, compliance: iam.getPartyByRole("ComplianceOfficer"),
         regulator: iam.getPartyByRole("Regulator"), recipient: party, 
-        assetId: selectedAsset.payload.instrument && selectedAsset.payload.instrument._1 ? selectedAsset.payload.instrument._1._2 : 'unknown', quantity: amount,
+        assetId: selectedAsset.payload.instrument && selectedAsset.payload.instrument.id && selectedAsset.payload.instrument.id._1 ? selectedAsset.payload.instrument.id._1 : selectedAsset.payload.name || 'unknown', quantity: amount,
         mintReason: "Institutional Capital Increase"
       });
       await ledger.exercise(AtomicMintWithAudit.ExecuteAtomicMint, auditContract.contractId, {});
@@ -80,7 +80,7 @@ export default function AssetManager() {
   };
 
   const handleBurnFromTreasury = async (amount: string) => {
-    const ticker = selectedAsset?.payload.instrument && selectedAsset.payload.instrument._1 ? selectedAsset.payload.instrument._1._2 : 'unknown';
+    const ticker = selectedAsset?.payload.instrument && selectedAsset.payload.instrument.id && selectedAsset.payload.instrument.id._1 ? selectedAsset.payload.instrument.id._1 : selectedAsset?.payload.name || 'unknown';
     const stats = assetStats[ticker];
     if (!stats?.treasuryCid) return;
     setLoading(true);
@@ -99,7 +99,7 @@ export default function AssetManager() {
   };
 
   const handleToggleRequest = async (newValue: boolean) => {
-    const ticker = selectedAsset.payload.instrument.id.unpack;
+    const ticker = selectedAsset.payload.instrument && selectedAsset.payload.instrument.id && selectedAsset.payload.instrument.id._1 ? selectedAsset.payload.instrument.id._1 : selectedAsset.payload.name || 'unknown';
     const policy = govPolicies.find(p => p.payload.assetId === ticker);
     if (!policy) return;
     try {
