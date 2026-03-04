@@ -334,7 +334,7 @@ template Loan
       controller lender
       do
         now <- getTime
-        assertMsg "Loan not yet matured" (now > maturityDate)
+        assertMsg "Loan not yet matured" (now >= maturityDate)
 
         -- ✅ 1. Create the physical holding for the Bank (The Missing Piece)
         -- This ensures the 'query' in your test actually finds the tokens

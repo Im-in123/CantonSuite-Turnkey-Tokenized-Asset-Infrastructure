@@ -1,126 +1,93 @@
-import React, { useState, useMemo } from "react";
-import { Asset } from "@daml.js/CantonSuite-0.0.1/lib/Assets";
-import { ProposedTrade, TradeAgreement } from "@daml.js/CantonSuite-0.0.1/lib/Trade";
-import { useLedger } from "@daml/react";
-import { ContractId } from "@daml/types"; 
+import React from "react";
+import { useLedger, useParty, useStreamQueries } from "@daml/react";
+import { 
+  GlobalDiscoveryListing, 
+  FirmMarketplaceListing, 
+  InvestorInvitation,
+  FirmMembership 
+} from "@daml.js/CantonSuite-0.1.0/lib/Marketplace/MultiTier";
 import { useToast } from "../../context/ToastContext";
 
-interface BuyerMarketplaceProps {
-  assets: readonly any[];
-  activeTrades: readonly any[];
-  isApproved: boolean;
-  isPending: boolean;
-  onSelectAsset: (asset: Asset) => void;
-}
-
-export default function BuyerMarketplace({ assets, activeTrades, isApproved, isPending, onSelectAsset }: BuyerMarketplaceProps) {
+export default function Marketplace() {
+  const party = useParty();
   const ledger = useLedger();
   const toast = useToast();
 
-  const [searchTerm, setSearchTerm] = useState("");
-  const [filterType, setFilterType] = useState("All");
-  const [maxPrice, setMaxPrice] = useState<number | "">("");
+  const { contracts: globalListings } = useStreamQueries(GlobalDiscoveryListing);
+  const { contracts: firmListings } = useStreamQueries(FirmMarketplaceListing);
+  const { contracts: invitations } = useStreamQueries(InvestorInvitation, () => [{ investor: party }]);
+  const { contracts: memberships } = useStreamQueries(FirmMembership, () => [{ member: party }]);
 
-  const assetTypes = ["All", ...Array.from(new Set(assets.map(a => a.payload.assetType)))];
-
-  const filteredAssets = useMemo(() => {
-    return assets.filter(a => {
-      const matchesSearch = 
-        a.payload.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-        a.payload.assetId.toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesType = filterType === "All" || a.payload.assetType === filterType;
-      const matchesPrice = maxPrice === "" || Number(a.payload.pricePerUnit) <= maxPrice;
-      const isAvailable = Number(a.payload.availableSupply) > 0;
-
-      return matchesSearch && matchesType && matchesPrice && isAvailable;
-    });
-  }, [assets, searchTerm, filterType, maxPrice]);
-
-  const handleCancel = async (trade: any) => {
-    try {
-        if (trade.status === "Waiting for Issuer") {
-            // Cancel ProposedTrade
-            await ledger.exercise(ProposedTrade.CancelProposal, trade.contractId as ContractId<ProposedTrade>, {});
-            toast.showToast("Proposal Cancelled", "info");
-        } else if (trade.status === "In Compliance Review") {
-            // Cancel TradeAgreement
-            await ledger.exercise(TradeAgreement.CancelTrade, trade.contractId as ContractId<TradeAgreement>, {});
-            toast.showToast("Trade Agreement Cancelled", "info");
-        }
-    } catch(e:any) {
-        toast.showToast("Failed to cancel: " + e.message, "error");
+  const handleFirmBuy = async (listing: any) => {
+    const membership = memberships.find(m => m.payload.membershipId === listing.payload.firmId);
+    if (!membership) {
+      toast.showToast("Membership Proof Required: Join the firm to buy at this price.", "error");
+      return;
     }
+    try {
+      // Logic: SECTION F.6 - Provide Membership Proof to buy from restricted Tier 2
+      await ledger.exercise(FirmMarketplaceListing.CreateMemberInterest, listing.contractId, {
+        buyer: party,
+        desiredQuantity: listing.payload.minimumPurchase,
+        membershipCid: membership.contractId
+      });
+      toast.showToast("Institutional Interest Registered.", "success");
+    } catch (e: any) { toast.showToast(e.message, "error"); }
+  };
+
+  const handleAcceptInvite = async (inv: any) => {
+    try {
+      // Logic: Tier 3 whitelisted acceptance
+      await ledger.exercise(InvestorInvitation.AcceptInvitation, inv.contractId, {
+        desiredQuantity: inv.payload.quantity
+      });
+      toast.showToast("Whitelisted allocation accepted.", "success");
+    } catch (e: any) { toast.showToast(e.message, "error"); }
   };
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "2rem" }}>
-      <div className="card">
-        <div className="flex-between" style={{marginBottom: '1rem', flexWrap: 'wrap', gap: '10px'}}>
-          <h3>Marketplace</h3>
-          <div style={{display: 'flex', gap: '10px'}}>
-            <input type="text" placeholder="Search Asset..." className="input-field" style={{padding: '0.5rem', width: '150px'}} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
-            <select className="input-field" style={{padding: '0.5rem'}} value={filterType} onChange={e => setFilterType(e.target.value)}>
-              {assetTypes.map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-            <input type="number" placeholder="Max Price" className="input-field" style={{padding: '0.5rem', width: '100px'}} value={maxPrice} onChange={e => setMaxPrice(e.target.value ? Number(e.target.value) : "")} />
+    <div className="flex-column" style={{ gap: '2rem' }}>
+      {invitations.length > 0 && (
+        <div className="card" style={{ border: '2px solid var(--accent)', background: 'linear-gradient(to right, #1a1b23, #1e1b2e)' }}>
+          <h3 style={{ color: 'var(--accent)' }}>✨ Institutional Private Placements (Tier 3)</h3>
+          <div className="grid-cols-2" style={{ marginTop: '1rem' }}>
+            {invitations.map(i => (
+              <div key={i.contractId} className="flex-between" style={{ background: 'var(--bg-dark)', padding: '1rem', borderRadius: '12px' }}>
+                <div>
+                  <span className="badge badge-accent">EXCLUSIVE</span>
+                  <h4 style={{ margin: '5px 0' }}>{i.payload.assetId}</h4>
+                  <p className="text-muted" style={{ fontSize: '0.8rem' }}>Discounted Price: ${i.payload.pricePerUnit}</p>
+                </div>
+                <button className="btn-primary" onClick={() => handleAcceptInvite(i)}>Commit</button>
+              </div>
+            ))}
           </div>
         </div>
-
-        {!isApproved ? (
-          <div style={{ padding: '3rem', textAlign: 'center', border: '1px dashed var(--border)', borderRadius: '8px', marginTop: '1rem' }}>
-            <p className="text-muted">Regulatory compliance requires KYC verification before viewing the order book.</p>
-            {isPending && <small style={{ color: 'var(--warning)' }}>Your application is under review.</small>}
-          </div>
-        ) : (
-          <table style={{ marginTop: '1rem' }}>
-            <thead><tr><th>Asset</th><th>Type</th><th>Price</th><th>Availability</th><th>Action</th></tr></thead>
-            <tbody>
-              {filteredAssets.length === 0 && <tr><td colSpan={5} className="text-muted">No matching assets found.</td></tr>}
-              {filteredAssets.map(a => (
-                <tr key={a.contractId}>
-                  <td>
-                    <div style={{ fontWeight: 'bold' }}>{a.payload.name}</div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{a.payload.assetId}</div>
-                  </td>
-                  <td>{a.payload.assetType}</td>
-                  <td style={{ color: 'var(--success)', fontWeight: 'bold' }}>${Number(a.payload.pricePerUnit).toFixed(2)}</td>
-                  <td>
-                    <div style={{ width: '100%', background: 'var(--bg-dark)', height: '6px', borderRadius: '3px', marginBottom: '4px' }}>
-                      <div style={{ width: `${(Number(a.payload.availableSupply) / Number(a.payload.totalSupply)) * 100}%`, background: 'var(--primary)', height: '100%', borderRadius: '3px' }}></div>
-                    </div>
-                    <span style={{ fontSize: '0.75rem' }}>{Number(a.payload.availableSupply).toLocaleString()} units</span>
-                  </td>
-                  <td><button className="btn-success" onClick={() => onSelectAsset(a.payload)}>Buy</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      )}
 
       <div className="card">
-        <h3>Order Status</h3>
-        {activeTrades.length === 0 && <p className="text-muted">No active orders</p>}
-        {activeTrades.map(t => (
-          <div key={t.contractId} style={{ padding: '0.8rem', borderBottom: '1px solid var(--border)' }}>
-            <div className="flex-between">
-              <span style={{ fontWeight: 'bold' }}>{t.payload.assetId}</span>
-              <span>{Number(t.payload.quantity)} units</span>
-            </div>
-            <div className="flex-between" style={{marginTop: '4px'}}>
-              <div style={{
-                fontSize: '0.8rem', color:
-                  t.status.includes("Settling") ? 'var(--success)' :
-                    t.status.includes("Compliance") ? 'var(--warning)' : 'var(--text-muted)'
-              }}>
-                {t.status}
-              </div>
-              {(t.status === "Waiting for Issuer" || t.status === "In Compliance Review") && (
-                 <button className="btn-outline" style={{padding:'2px 6px', fontSize:'0.7rem'}} onClick={() => handleCancel(t)}>Cancel</button>
-              )}
-            </div>
-          </div>
-        ))}
+        <h3>Market Discovery</h3>
+        <table>
+          <thead><tr><th>Tier</th><th>Asset</th><th>Price</th><th>Action</th></tr></thead>
+          <tbody>
+            {globalListings.map(g => (
+              <tr key={g.contractId}>
+                <td><span className="badge badge-blue">Tier 1: Global</span></td>
+                <td><b>{g.payload.assetId}</b></td>
+                <td style={{ color: 'var(--success)' }}>${g.payload.pricePerUnit}</td>
+                <td><button className="btn-outline">Express Interest</button></td>
+              </tr>
+            ))}
+            {firmListings.map(f => (
+              <tr key={f.contractId}>
+                <td><span className="badge badge-accent">Tier 2: {f.payload.firmId}</span></td>
+                <td><b>{f.payload.assetId}</b></td>
+                <td style={{ color: 'var(--success)' }}>${f.payload.pricePerUnit}</td>
+                <td><button className="btn-primary" onClick={() => handleFirmBuy(f)}>Buy as Member</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );

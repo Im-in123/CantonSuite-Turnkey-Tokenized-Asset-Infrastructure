@@ -40,3 +40,4 @@ start-navigator: no
 build-options:
   - --target=1.17
   - -Wno-upgrade-interfaces
+

@@ -1,6 +1,13 @@
 import React from "react";
 import { useLedger, useParty, useStreamQueries } from "@daml/react";
-import { LendingPool, DepositEffect, WithdrawalEffect, BatchEffectProcessor } from "@daml.js/CantonSuite-0.1.0/lib/Lending/Pool";
+import { 
+  LendingPool, 
+  DepositEffect, 
+  WithdrawalEffect, 
+  BorrowEffect,
+  RepaymentEffect,
+  BatchEffectProcessor 
+} from "@daml.js/CantonSuite-0.1.0/lib/Lending/Pool";
 import { useToast } from "../../../context/ToastContext";
 
 export default function BatchProcessor() {
@@ -9,51 +16,42 @@ export default function BatchProcessor() {
   const toast = useToast();
 
   const { contracts: pools } = useStreamQueries(LendingPool, () => [{ poolOperator: party }]);
-  const { contracts: depositEffects } = useStreamQueries(DepositEffect, () => [{ poolOperator: party }]);
-  const { contracts: withdrawalEffects } = useStreamQueries(WithdrawalEffect, () => [{ poolOperator: party }]);
   const { contracts: processors } = useStreamQueries(BatchEffectProcessor, () => [{ poolOperator: party }]);
+  
+  // All pending effects
+  const { contracts: dEffs } = useStreamQueries(DepositEffect, () => [{ poolOperator: party }]);
+  const { contracts: wEffs } = useStreamQueries(WithdrawalEffect, () => [{ poolOperator: party }]);
+  const { contracts: bEffs } = useStreamQueries(BorrowEffect, () => [{ poolOperator: party }]);
+  const { contracts: rEffs } = useStreamQueries(RepaymentEffect, () => [{ poolOperator: party }]);
 
   const handleApplyBatch = async (poolCid: string) => {
     const processor = processors.find(p => p.payload.poolCid === poolCid);
-    const poolDeposits = depositEffects.filter(e => e.payload.poolCid === poolCid).map(e => e.contractId);
-    const poolWithdrawals = withdrawalEffects.filter(e => e.payload.poolCid === poolCid).map(e => e.contractId);
-
     if (!processor) return;
 
+    const byPool = (arr: any[]) => arr.filter(e => e.payload.poolCid === poolCid).map(e => e.contractId);
+
     try {
-      // Logic: Process both deposits and withdrawals atomically
+      // Logic: SECTION D.1 - Apply Mixed Batch (The Backend reorders Repayments first for Liquidity)
       await ledger.exercise(BatchEffectProcessor.ProcessMixedBatch, processor.contractId, {
-        depositCids: poolDeposits,
-        withdrawalCids: poolWithdrawals,
-        borrowCids: [],
-        repaymentCids: []
+        depositCids: byPool(dEffs),
+        withdrawalCids: byPool(wEffs),
+        borrowCids: byPool(bEffs),
+        repaymentCids: byPool(rEffs)
       });
-      toast.showToast("Batch processed: Liquidity updated atomically.", "success");
+      toast.showToast("Atomic Pool Synchronization Complete.", "success");
     } catch (e: any) { toast.showToast(e.message, "error"); }
   };
 
   return (
-    <div className="card">
-      <h3>Atomic Liquidity Queue</h3>
+    <div className="card" style={{ borderTop: '4px solid var(--primary)' }}>
+      <h3>Atomic Liquidity Processor</h3>
+      <p className="text-muted" style={{fontSize: '0.8rem'}}>Process parallel commitments into the lending pool.</p>
       {pools.map(p => {
-        const dCount = depositEffects.filter(e => e.payload.poolCid === p.contractId).length;
-        const wCount = withdrawalEffects.filter(e => e.payload.poolCid === p.contractId).length;
-        
+        const totalCount = [dEffs, wEffs, bEffs, rEffs].reduce((sum, arr) => sum + arr.filter(e => e.payload.poolCid === p.contractId).length, 0);
         return (
-          <div key={p.contractId} className="flex-between" style={{ padding: '1rem', background: 'var(--bg-dark)', borderRadius: '8px', marginBottom: '1rem' }}>
-            <div>
-              <strong>{p.payload.assetId} Pool</strong>
-              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                {dCount} Deposits | {wCount} Withdrawals pending
-              </div>
-            </div>
-            <button 
-              className="btn-primary" 
-              disabled={dCount + wCount === 0} 
-              onClick={() => handleApplyBatch(p.contractId)}
-            >
-              Apply All Changes
-            </button>
+          <div key={p.contractId} className="flex-between" style={{ padding: '1rem', background: 'var(--bg-dark)', borderRadius: '8px', marginTop: '1rem' }}>
+            <span><b>{p.payload.assetId} Pool</b> ({totalCount} Effects)</span>
+            <button className="btn-primary" disabled={totalCount === 0} onClick={() => handleApplyBatch(p.contractId)}>Sync Ledger</button>
           </div>
         );
       })}

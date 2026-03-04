@@ -162,6 +162,7 @@ runAssetGenesisAndMaintenance setup = script do
 
 runInfraOperations : SetupResult -> AssetResult -> Script ()
 runInfraOperations setup assets = script do
+  now <- getTime 
   let baseDate = date 2024 Jan 1
   migReq <- submit setup.alice $ createCmd Sync.SynchronizerMigrationRequest with 
     requester = setup.alice
@@ -171,7 +172,7 @@ runInfraOperations setup assets = script do
     targetSync = "global-sync"
     reason = "Move to market"
     requestedAt = (toTime baseDate)
-    deadline = addRelTime (toTime baseDate) (hours 24)
+    deadline = addRelTime now (hours 24) -- Set deadline to 24 hours from 'now'
     
   _ <- submit setup.issuer $ exerciseCmd migReq Sync.ApproveMigration
   pure ()
@@ -477,6 +478,7 @@ runLendingOperations setup = script do
 
 runLendingRiskManagement : SetupResult -> AssetResult -> Script ()
 runLendingRiskManagement setup assets = script do
+  now <- getTime 
   -- ✅ TIER 4: BILATERAL (LENDING) TRIGGERED
   [(poolCid, _)] <- query @LendingPool setup.bank
   
@@ -495,8 +497,9 @@ runLendingRiskManagement setup assets = script do
     collateralAssetId = "NYC-TOWER"
     collateralAmount = 10.0
     collateralCid = aliceCol
-    durationDays = 0
-    createdAt = (toTime baseDate)
+    -- durationDays = 0
+    durationDays = -1   --set to negative instead of 0 to avoid using 'passtime' because of sdk version incompatibilty
+    createdAt = now 
     complianceParty = setup.compliance
     regulatorParty = setup.regulator
     miningRoundCid = None
@@ -508,7 +511,7 @@ runLendingRiskManagement setup assets = script do
     poolCurrentSync = "sandbox"
     targetSync = "sandbox"
     
-  passTime (hours 1)
+  -- passTime (hours 1) --will have to a workaround this bug later
   
   [(updatedPoolCid, _)] <- query @LendingPool setup.bank
   _ <- submit setup.bank $ exerciseCmd loanCid LiquidateCollateral with 
@@ -520,6 +523,7 @@ runLendingRiskManagement setup assets = script do
 
 runFinalLifecycle : SetupResult -> ContractId Holding -> Script ()
 runFinalLifecycle setup aliceProp = script do
+  now <- getTime
   mReq <- submitMulti [setup.issuer, setup.bob] [] $ createCmd AtomicMintWithAudit with 
     issuer = setup.issuer
     compliance = setup.compliance
@@ -540,7 +544,7 @@ runFinalLifecycle setup aliceProp = script do
     
   _ <- submit setup.compliance $ exerciseCmd cReq AuthorizeClawback with 
     complianceOfficer = "Officer Sarah"
-    authorizationDate = (toTime baseDate)
+    authorizationDate = now
     courtOrderHash = "DOC"
     
   now <- getTime

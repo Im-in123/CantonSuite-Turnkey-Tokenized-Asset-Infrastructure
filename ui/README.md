@@ -41,27 +41,10 @@ npm run dev
 ```
 
 ## Project Structure
-src/
-- components/
-  - buyer/        — Marketplace, Portfolio
-  - issuer/       — Asset Management, Yield tools
-  - lending/      — Pools, Loans, Requests workflow
-  - LoadingSpinner.tsx
-  - MainLayout.tsx — Role-based navigation wrapper
-  - Modal.tsx
-- context/
-  - ToastContext.tsx
-- daml/           — Auto-generated DAML TypeScript bindings
+
 - hooks/
   - useStreamNotification.ts
-- pages/
-  - BuyerDashboard.tsx
-  - IssuerDashboard.tsx
-  - LendingDashboard.tsx
-  - ComplianceDashboard.tsx
-  - RegulatorDashboard.tsx
-  - Login.tsx
-  - Signup.tsx
+-  
 - services/
   - CantonIAM.ts   — JWT & party allocation helper for Sandbox
 - App.tsx
@@ -71,7 +54,7 @@ src/
 - Live Ledger Sync via `useStreamQueries` (no REST polling; real-time updates over WebSocket).
 - Role-based rendering: dynamic dashboards for Issuer, Buyer, Compliance, Regulator.
 - CantonIAM: local JWT generation and Sandbox party setup for developer quick access.
-- DeFi Lending module: pools, positions, request approval flows.
+- DeFi Lending  
 - Custom financial dark theme (CSS variables).
 
 ## Development Notes
