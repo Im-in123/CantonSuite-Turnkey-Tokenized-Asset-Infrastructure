@@ -166,7 +166,7 @@ export default function MarketPresence() {
                   ) : l.type === "DIRECT" ? (
                     <button className="btn-primary" onClick={() => handleDirectSubscription(l)}>Accept</button>
                   ) : (
-                    <button className="btn-outline" style={{color:'var(--danger)'}} onClick={() => ledger.archive(l.templateId, l.contractId)}>Withdraw</button>
+                    <button className="btn-outline" style={{color:'var(--danger)'}} onClick={() => ledger.archive(listing.contractId)}>Withdraw</button>
                   )}
                 </td>
               </tr>

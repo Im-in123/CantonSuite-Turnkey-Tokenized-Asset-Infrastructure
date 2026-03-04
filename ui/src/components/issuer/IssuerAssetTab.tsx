@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from "react";
 import { RWAInstrument } from "@daml.js/CantonSuite-0.1.0/lib/Finance/Instruments";
 import { useLedger, useParty, useStreamQueries } from "@daml/react";
-import { Holding } from "@daml.js/CantonSuite-0.1.0/lib/TokenStandard/Interfaces";
+import { Holding_Impl } from "@daml.js/CantonSuite-0.1.0/lib/Portfolio";
 import { FractionalizationGovernance } from "@daml.js/CantonSuite-0.1.0/lib/Finance/FractionalizationSafety";
 import Modal from "../Modal";
 import { useToast } from "../../context/ToastContext";
@@ -42,7 +42,7 @@ export default function IssuerAssetTab({
   const [isSubmitting, setIsSubmitting] = useState(false);
   
   // --- QUERY HOOKS FOR ASSET OPERATIONS ---
-  const { contracts: allHoldings } = useStreamQueries(Holding);
+  const { contracts: allHoldings } = useStreamQueries(Holding_Impl);
   const { contracts: govPolicies } = useStreamQueries(FractionalizationGovernance);
 
   // --- HANDLERS FOR FRAC AND CLAWBACK ---
@@ -58,7 +58,7 @@ export default function IssuerAssetTab({
 
   const handleToggleFractionalization = async (newValue: boolean) => {
     if (!selectedAsset) return;
-    const assetId = selectedAsset?.instrument?.id?._1 || selectedAsset?.name || 'unknown';
+    const assetId = selectedAsset?.payload.instrument?.id?.unpack || selectedAsset?.payload.name || 'unknown';
     const policy = govPolicies.find(p => p.payload.assetId === assetId);
     if (!policy) {
       toast.showToast("No governance policy found for this asset", "error");
@@ -78,7 +78,7 @@ export default function IssuerAssetTab({
   const handleClawbackSubmit = async (holdingCid: string, reason: string, caseRef: string) => {
     setIsSubmitting(true);
     try {
-      await ledger.exercise(Holding.InitiateClawback, holdingCid as any, {
+      await ledger.exercise(Holding_Impl.InitiateClawback, holdingCid as any, {
         legalReason: reason, jurisdiction: "International", caseReference: caseRef
       });
       toast.showToast("Clawback initiated. Asset frozen.", "warning");
@@ -90,15 +90,25 @@ export default function IssuerAssetTab({
   // --- ASSET STATS CALCULATION ---
   const assetStats = useMemo(() => {
     const stats: Record<string, { inTreasury: number; totalSupply: number; treasuryCid: string | null }> = {};
+    
+    console.log('DEBUG: Calculating asset stats for', assets.length, 'assets');
+    console.log('DEBUG: Holdings available:', allHoldings.length);
+    
     assets.forEach(a => { 
       if (!a.payload) return;
-      const instrumentId = a.payload.instrument?.id?._1 || a.payload.name || 'unknown';
+      const instrumentId = a.payload.instrument?.id?.unpack || a.payload.name || 'unknown';
+      console.log('DEBUG: Asset instrumentId:', instrumentId, 'from asset:', a.payload.name);
       stats[instrumentId] = { inTreasury: 0, totalSupply: 0, treasuryCid: null }; 
     });
-    allHoldings.forEach(h => {
+    
+    allHoldings.forEach((h: any) => {
       if (!h.payload) return;
       const ticker = h.payload.assetId;
-      if (!stats[ticker]) return;
+      console.log('DEBUG: Holding assetId:', ticker, 'owner:', h.payload.owner, 'quantity:', h.payload.quantity);
+      if (!stats[ticker]) {
+        console.log('DEBUG: No matching asset found for holding assetId:', ticker);
+        return;
+      }
       const qty = Number(h.payload.quantity) || 0;
       stats[ticker].totalSupply += qty;
       if (h.payload.owner === party) {
@@ -106,6 +116,8 @@ export default function IssuerAssetTab({
         if (!h.payload.locked) { stats[ticker].treasuryCid = h.contractId; }
       }
     });
+    
+    console.log('DEBUG: Final asset stats:', stats);
     return stats;
   }, [allHoldings, assets, party]);
 
@@ -124,7 +136,7 @@ export default function IssuerAssetTab({
     const finalFiltered = validAssets.filter(a => {
       const matchesSearch = 
         a.payload.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (a.payload.instrument && a.payload.instrument.id && a.payload.instrument.id._1 && a.payload.instrument.id._1.toLowerCase().includes(searchTerm.toLowerCase()));
+        (a.payload.instrument && a.payload.instrument.id && a.payload.instrument.id.unpack && a.payload.instrument.id.unpack.toLowerCase().includes(searchTerm.toLowerCase()));
       const matchesFilter = 
         fractionalFilter === "All" || 
         (fractionalFilter === "Fractionalized" ? a.payload.fractionalized : !a.payload.fractionalized);
@@ -198,13 +210,27 @@ export default function IssuerAssetTab({
                 </td>
                 <td>
                   {(() => {
-                    const assetId = a.payload.instrument?.id?._1 || a.payload.name || 'unknown';
+                    const assetId = a.payload.instrument?.id?.unpack || a.payload.name || 'unknown';
                     const stats = assetStats[assetId] || { inTreasury: 0, totalSupply: 0 };
                     const utilization = stats.totalSupply > 0 ? (stats.inTreasury / stats.totalSupply) * 100 : 0;
                     return (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <div style={{ width: '60px', height: '6px', background: '#222', borderRadius: '3px' }}>
-                          <div style={{ height: '100%', width: `${utilization}%`, background: utilization > 50 ? 'var(--success)' : utilization > 20 ? 'var(--warning)' : 'var(--danger)' }} />
+                        <div style={{ 
+                          width: '60px', 
+                          height: '8px', 
+                          background: '#2a2a2a', 
+                          borderRadius: '6px',
+                          border: '1px solid #444',
+                          overflow: 'hidden',
+                          position: 'relative'
+                        }}>
+                          <div style={{ 
+                            height: '100%', 
+                            width: `${utilization}%`, 
+                            background: utilization > 50 ? 'var(--success)' : utilization > 20 ? 'var(--warning)' : 'var(--danger)',
+                            borderRadius: '4px',
+                            transition: 'width 0.3s ease, background 0.3s ease'
+                          }} />
                         </div>
                         <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                           {stats.inTreasury.toLocaleString()} / {stats.totalSupply.toLocaleString()}
@@ -216,7 +242,7 @@ export default function IssuerAssetTab({
                 <td>
                   <button className="btn-outline" onClick={() => onManage(a.payload, a.contractId)}>Manage</button>
                   {onPublishToMarket && (() => {
-                    const assetId = a.payload.instrument?.id?._1 || a.payload.name || 'unknown';
+                    const assetId = a.payload.instrument?.id?.unpack || a.payload.name || 'unknown';
                     const stats = assetStats[assetId] || { totalSupply: 0 };
                     const hasSupply = stats.totalSupply > 0;
                     return (

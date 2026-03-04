@@ -3,6 +3,9 @@ import { useLedger, useParty, useStreamQueries } from "@daml/react";
 import { ContractId } from "@daml/types";
 import { RWAInstrument } from "@daml.js/CantonSuite-0.1.0/lib/Finance/Instruments";
 import { DraftRWAInstrument } from "@daml.js/CantonSuite-0.1.0/lib/Finance/Instruments";
+import { AtomicMintWithAudit, AtomicBurnWithAudit } from "@daml.js/CantonSuite-0.1.0/lib/Compliance/AtomicAudit";
+import { Holding_Impl } from "@daml.js/CantonSuite-0.1.0/lib/Portfolio";
+import { Holding } from "@daml.js/CantonSuite-0.1.0/lib/TokenStandard/Interfaces";
 import * as Trade from "@daml.js/CantonSuite-0.1.0/lib/Trade";
 import { Allocation } from "@daml.js/CantonSuite-0.1.0/lib/TokenStandard/Interfaces";
 import { RedemptionRequest } from "@daml.js/CantonSuite-0.1.0/lib/Redemption/Atomic";
@@ -180,16 +183,66 @@ export default function IssuerDashboard() {
 
   const handleManagement = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!manageCid || isSubmitting) return;
+    if (!manageCid || isSubmitting) {
+      if (!manageCid) {
+        toast.showToast("Error: No asset contract selected. Please select an asset first.", "error");
+      }
+      return;
+    }
+    
+    console.log('DEBUG: Executing', actionType, 'on contract:', manageCid);
+    console.log('DEBUG: Selected asset:', selectedAsset);
+    
     setIsSubmitting(true);
     try {
-        if (actionType === "Mint") await ledger.exercise(RWAInstrument.Mint, manageCid, { amount: actionValue.toFixed(1) });
-        else if (actionType === "Burn") await ledger.exercise(RWAInstrument.Burn, manageCid, { amount: actionValue.toFixed(1) });
-        else if (actionType === "UpdatePrice") await ledger.exercise(RWAInstrument.UpdatePrice, manageCid, { newPrice: actionValue.toFixed(2) });
+        if (actionType === "Mint") {
+          console.log('DEBUG: Attempting AtomicMintWithAudit approach');
+          const auditContract = await ledger.create(AtomicMintWithAudit, {
+            issuer: party, 
+            compliance: iam.getPartyByRole("ComplianceOfficer"),
+            regulator: iam.getPartyByRole("Regulator"), 
+            recipient: party, 
+            assetId: selectedAsset?.payload.instrument?.id?.unpack || 'unknown',
+            quantity: actionValue.toFixed(1),
+            mintReason: "Treasury Mint via Asset Management"
+          });
+          await ledger.exercise(AtomicMintWithAudit.ExecuteAtomicMint, auditContract.contractId, {});
+        }
+        else if (actionType === "Burn") {
+          console.log('DEBUG: Attempting AtomicBurnWithAudit approach');
+          // For burn, we need to find a treasury holding first
+          const assetId = selectedAsset?.payload.instrument?.id?.unpack || 'unknown';
+          const treasuryHoldings = await ledger.query(Holding_Impl, { owner: party, assetId: assetId });
+          const treasuryHolding = treasuryHoldings.find(h => !h.payload.locked);
+          if (!treasuryHolding) {
+            throw new Error("No available treasury holding to burn from");
+          }
+          
+          const auditContract = await ledger.create(AtomicBurnWithAudit, {
+            issuer: party, 
+            compliance: iam.getPartyByRole("ComplianceOfficer"),
+            regulator: iam.getPartyByRole("Regulator"), 
+            burnHolder: party, 
+            holdingCid: treasuryHolding.contractId as any,
+            quantity: actionValue.toFixed(1), 
+            burnReason: "Treasury Burn via Asset Management"
+          });
+          await ledger.exercise(AtomicBurnWithAudit.ExecuteAtomicBurn, auditContract.contractId, {});
+        }
+        else if (actionType === "UpdatePrice") {
+          console.log('DEBUG: Attempting RWAInstrument.UpdatePrice exercise');
+          await ledger.exercise(RWAInstrument.UpdatePrice, manageCid, { newPrice: actionValue.toFixed(2) });
+        }
         toast.showToast(`${actionType} Executed Successfully`, "success");
         setSelectedAsset(null);
         setManageCid(null);
-    } catch (err: any) { toast.showToast(err.message, "error"); } finally { setIsSubmitting(false); }
+        setActionValue(0);
+    } catch (err: any) { 
+      console.error('DEBUG: Management error:', err);
+      toast.showToast(err.message || "Failed to execute action", "error"); 
+    } finally { 
+      setIsSubmitting(false); 
+    }
   };
 
   const acceptTrade = (cid: any) => execute(cid, () => ledger.exercise(Trade.ProposedTrade.SellerAccept, cid, {}), "Trade Accepted");
@@ -273,13 +326,64 @@ export default function IssuerDashboard() {
       <Modal isOpen={!!selectedAsset} onClose={() => !isSubmitting && (setSelectedAsset(null), setManageCid(null))} title={`Manage ${selectedAsset?.name}`}>
           <form onSubmit={handleManagement}>
               <div style={{display:'flex', gap:'1rem', marginBottom:'1rem'}}>
-                  <button type="button" disabled={isSubmitting} className={`btn-outline ${actionType === 'Mint' ? 'btn-primary' : ''}`} onClick={() => setActionType("Mint")}>Mint</button>
-                  <button type="button" disabled={isSubmitting} className={`btn-outline ${actionType === 'Burn' ? 'btn-danger' : ''}`} onClick={() => setActionType("Burn")}>Burn</button>
-                  <button type="button" disabled={isSubmitting} className={`btn-outline ${actionType === 'UpdatePrice' ? 'btn-success' : ''}`} onClick={() => setActionType("UpdatePrice")}>Set Price</button>
+                  <button 
+                      type="button" 
+                      disabled={isSubmitting} 
+                      className={`btn-outline ${actionType === 'Mint' ? 'active-action' : ''}`} 
+                      onClick={() => setActionType("Mint")}
+                      style={{
+                          backgroundColor: actionType === 'Mint' ? 'var(--success)' : 'transparent',
+                          color: actionType === 'Mint' ? 'white' : 'var(--success)',
+                          borderColor: actionType === 'Mint' ? 'var(--success)' : 'var(--success)',
+                          fontWeight: actionType === 'Mint' ? 'bold' : 'normal',
+                          transform: actionType === 'Mint' ? 'scale(1.05)' : 'scale(1)',
+                          boxShadow: actionType === 'Mint' ? '0 4px 12px rgba(34, 197, 94, 0.3)' : 'none'
+                      }}
+                  >Mint</button>
+                  <button 
+                      type="button" 
+                      disabled={isSubmitting} 
+                      className={`btn-outline ${actionType === 'Burn' ? 'active-action' : ''}`} 
+                      onClick={() => setActionType("Burn")}
+                      style={{
+                          backgroundColor: actionType === 'Burn' ? 'var(--danger)' : 'transparent',
+                          color: actionType === 'Burn' ? 'white' : 'var(--danger)',
+                          borderColor: actionType === 'Burn' ? 'var(--danger)' : 'var(--danger)',
+                          fontWeight: actionType === 'Burn' ? 'bold' : 'normal',
+                          transform: actionType === 'Burn' ? 'scale(1.05)' : 'scale(1)',
+                          boxShadow: actionType === 'Burn' ? '0 4px 12px rgba(239, 68, 68, 0.3)' : 'none'
+                      }}
+                  >Burn</button>
+                  <button 
+                      type="button" 
+                      disabled={isSubmitting} 
+                      className={`btn-outline ${actionType === 'UpdatePrice' ? 'active-action' : ''}`} 
+                      onClick={() => setActionType("UpdatePrice")}
+                      style={{
+                          backgroundColor: actionType === 'UpdatePrice' ? 'var(--primary)' : 'transparent',
+                          color: actionType === 'UpdatePrice' ? 'white' : 'var(--primary)',
+                          borderColor: actionType === 'UpdatePrice' ? 'var(--primary)' : 'var(--primary)',
+                          fontWeight: actionType === 'UpdatePrice' ? 'bold' : 'normal',
+                          transform: actionType === 'UpdatePrice' ? 'scale(1.05)' : 'scale(1)',
+                          boxShadow: actionType === 'UpdatePrice' ? '0 4px 12px rgba(59, 130, 246, 0.3)' : 'none'
+                      }}
+                  >Set Price</button>
               </div>
               <label>{actionType === 'UpdatePrice' ? 'New Price ($)' : 'Quantity'}</label>
               <input type="number" className="input-field" style={{width:'100%', marginBottom:'1rem', padding: '0.5rem'}} value={actionValue} onChange={e => setActionValue(parseFloat(e.target.value))} step={actionType === 'UpdatePrice' ? "0.01" : "1"} disabled={isSubmitting} />
-              <button type="submit" className="btn-primary" style={{width:'100%'}} disabled={isSubmitting}>{isSubmitting ? "Executing..." : `Execute ${actionType}`}</button>
+              <button 
+                  type="submit" 
+                  className="btn-primary" 
+                  style={{
+                      width:'100%', 
+                      backgroundColor: actionType === 'Mint' ? 'var(--success)' : actionType === 'Burn' ? 'var(--danger)' : 'var(--primary)',
+                      borderColor: actionType === 'Mint' ? 'var(--success)' : actionType === 'Burn' ? 'var(--danger)' : 'var(--primary)',
+                      fontWeight: 'bold'
+                  }} 
+                  disabled={isSubmitting}
+              >
+                  {isSubmitting ? "Executing..." : `Execute ${actionType}`}
+              </button>
           </form>
       </Modal>
 
