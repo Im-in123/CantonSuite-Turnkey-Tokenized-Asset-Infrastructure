@@ -22,6 +22,15 @@ import { SynchronizerMigrationRequest, MigrationWorkflow } from "@daml.js/Canton
 import Modal from "../components/Modal";
 import { useToast } from "../context/ToastContext";
 import { useStreamNotification } from "../hooks/useStreamNotification";
+import { 
+  PrivacyPreservingListing,
+  GlobalDiscoveryListing, 
+  FirmMarketplaceListing, 
+  InvestorInvitation,
+  ClubDeal,
+  SubscriptionRequest,
+  PurchaseIntent
+} from "@daml.js/CantonSuite-0.1.0/lib/Marketplace/MultiTier";
 import CantonIAM from "../services/CantonIAM";
 
 import IssuerAssetTab from "../components/issuer/IssuerAssetTab";
@@ -437,37 +446,114 @@ export default function IssuerDashboard() {
       </Modal>
 
       {/* Publish to Market Modal */}
-      <Modal isOpen={assetManagerModal === "PUBLISH"} onClose={() => setAssetManagerModal(null)} title={`Publish: ${selectedAssetForManager?.name || 'Asset'}`}>
-        <form onSubmit={(e) => {
+      <Modal isOpen={assetManagerModal === "PUBLISH"} onClose={() => setAssetManagerModal(null)} title={`Publish: ${selectedAssetForManager?.payload?.name || 'Asset'}`}>
+        <form onSubmit={async (e) => {
           e.preventDefault();
-          toast.showToast("Asset published to marketplace!", "success");
-          setAssetManagerModal(null);
+          if (!selectedAssetForManager) return;
+          
+          console.log('DEBUG: selectedAssetForManager:', selectedAssetForManager);
+          console.log('DEBUG: selectedAssetForManager.payload:', selectedAssetForManager.payload);
+          
+          setIsSubmitting(true);
+          try {
+            const formData = new FormData(e.currentTarget);
+            const quantity = parseFloat(formData.get("quantity") as string);
+            const visibilityTier = formData.get("visibilityTier") as string;
+            
+            const complianceParty = iam.getPartyByRole("ComplianceOfficer");
+            const regulatorParty = iam.getPartyByRole("Regulator");
+            
+            if (!complianceParty || !regulatorParty) {
+              toast.showToast("System Error: Required parties not found", "error");
+              return;
+            }
+
+            // Safety check for payload
+            if (!selectedAssetForManager.payload) {
+              throw new Error("Asset payload is undefined");
+            }
+
+            // Create the visibility configuration based on tier selection
+            let visibility;
+            if (visibilityTier === "Global") {
+              visibility = {
+                tier: "GlobalTier",
+                firmMembership: null,
+                selectedInvestors: [],
+                directRecipient: null
+              };
+            } else if (visibilityTier === "Firm") {
+              visibility = {
+                tier: "FirmOnlyTier",
+                firmMembership: { value: "DEFAULT_FIRM" }, // You may want to make this configurable
+                selectedInvestors: [],
+                directRecipient: null
+              };
+            } else if (visibilityTier === "Selected") {
+              visibility = {
+                tier: "SelectedTier",
+                firmMembership: null,
+                selectedInvestors: [], // You may want to make this configurable
+                directRecipient: null
+              };
+            } else {
+              visibility = {
+                tier: "DirectTier",
+                firmMembership: null,
+                selectedInvestors: [],
+                directRecipient: null // You may want to make this configurable
+              };
+            }
+
+            // Create PrivacyPreservingListing contract
+            await ledger.create(PrivacyPreservingListing, {
+              listingId: `${selectedAssetForManager.payload.instrument?.id?.unpack || selectedAssetForManager.payload.name}-${Date.now()}`,
+              issuer: party,
+              assetId: selectedAssetForManager.payload.instrument?.id?.unpack || selectedAssetForManager.payload.name,
+              instrumentCid: selectedAssetForManager.contractId,
+              quantity: quantity.toFixed(1),
+              pricePerUnit: selectedAssetForManager.payload.pricePerUnit,
+              visibility: visibility,
+              createdAt: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days
+              minimumPurchase: "1.0",
+              compliance: complianceParty
+            });
+
+            toast.showToast("Asset published to marketplace! Go to Market Presence to activate.", "success");
+            setAssetManagerModal(null);
+          } catch (e: any) {
+            console.error('DEBUG: Publish error:', e);
+            toast.showToast(e.message || "Failed to publish asset", "error");
+          } finally {
+            setIsSubmitting(false);
+          }
         }} style={{display: 'flex', flexDirection: 'column', gap: '1rem'}}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
             <label style={{ fontSize: '0.875rem', fontWeight: '500', color: 'var(--text-main)' }}>Asset</label>
             <input 
               type="text" 
               className="input-field" 
-              value={selectedAssetForManager?.name || ''} 
+              value={selectedAssetForManager?.payload?.name || ''} 
               disabled 
               style={{background: 'var(--bg-dark)', color: 'var(--text-muted)'}}
             />
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
             <label style={{ fontSize: '0.875rem', fontWeight: '500', color: 'var(--text-main)' }}>Quantity to Publish</label>
-            <input type="number" className="input-field" placeholder="Enter quantity" required />
+            <input type="number" name="quantity" className="input-field" placeholder="Enter quantity" required min="1" step="0.1" />
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
             <label style={{ fontSize: '0.875rem', fontWeight: '500', color: 'var(--text-main)' }}>Visibility Tier</label>
-            <select className="input-field">
+            <select name="visibilityTier" className="input-field">
               <option value="Global">Global Discovery</option>
               <option value="Firm">Firm-Only</option>
               <option value="Selected">Whitelist</option>
               <option value="Direct">Direct</option>
             </select>
           </div>
-          <button className="btn-primary" type="submit" style={{marginTop: '0.5rem'}}>
-            Publish to Marketplace
+          <button className="btn-primary" type="submit" style={{marginTop: '0.5rem'}} disabled={isSubmitting}>
+            {isSubmitting ? "Publishing..." : "Publish to Marketplace"}
           </button>
         </form>
       </Modal>

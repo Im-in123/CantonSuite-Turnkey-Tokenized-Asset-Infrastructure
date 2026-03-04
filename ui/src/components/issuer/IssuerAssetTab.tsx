@@ -256,7 +256,7 @@ export default function IssuerAssetTab({
                           borderColor: hasSupply ? 'var(--primary)' : 'var(--border)',
                           color: hasSupply ? 'white' : 'var(--text-muted)'
                         }}
-                        onClick={() => hasSupply && onPublishToMarket(a.payload)}
+                        onClick={() => hasSupply && onPublishToMarket(a)}
                         disabled={!hasSupply}
                         title={hasSupply ? 'Publish to marketplace' : 'No supply available to publish'}
                       >

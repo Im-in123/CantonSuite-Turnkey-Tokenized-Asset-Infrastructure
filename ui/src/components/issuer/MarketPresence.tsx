@@ -127,6 +127,29 @@ export default function MarketPresence() {
 
   return (
     <div className="flex-column" style={{ gap: '1.5rem' }}>
+      {/* Tier Summary Dashboard */}
+      <div className="grid-cols-4" style={{ gap: '1rem' }}>
+        <div className="card" style={{ textAlign: 'center', border: '1px solid var(--primary)' }}>
+          <h4 style={{ color: 'var(--primary)', margin: '0 0 0.5rem 0' }}>Tier 1: Global</h4>
+          <div className="big-stat" style={{ color: 'var(--primary)' }}>{global.length}</div>
+          <p className="text-muted" style={{ fontSize: '0.8rem', margin: 0 }}>Public Discovery</p>
+        </div>
+        <div className="card" style={{ textAlign: 'center', border: '1px solid var(--purple)' }}>
+          <h4 style={{ color: 'var(--purple)', margin: '0 0 0.5rem 0' }}>Tier 2: Firm</h4>
+          <div className="big-stat" style={{ color: 'var(--purple)' }}>{firm.length}</div>
+          <p className="text-muted" style={{ fontSize: '0.8rem', margin: 0 }}>Membership Gated</p>
+        </div>
+        <div className="card" style={{ textAlign: 'center', border: '1px solid var(--success)' }}>
+          <h4 style={{ color: 'var(--success)', margin: '0 0 0.5rem 0' }}>Tier 3: Private</h4>
+          <div className="big-stat" style={{ color: 'var(--success)' }}>{invites.length}</div>
+          <p className="text-muted" style={{ fontSize: '0.8rem', margin: 0 }}>Whitelisted</p>
+        </div>
+        <div className="card" style={{ textAlign: 'center', border: '1px solid var(--warning)' }}>
+          <h4 style={{ color: 'var(--warning)', margin: '0 0 0.5rem 0' }}>Tier 4: Direct</h4>
+          <div className="big-stat" style={{ color: 'var(--warning)' }}>{directSubscriptions.length}</div>
+          <p className="text-muted" style={{ fontSize: '0.8rem', margin: 0 }}>Bilateral</p>
+        </div>
+      </div>
       <div className="flex-gap" style={{ background: 'var(--bg-card)', padding: '0.5rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
         {(["ALL", "GLOBAL", "FIRM", "PRIVATE", "DIRECT", "PENDING", "INTEREST"] as MarketFilter[]).map(f => (
           <button key={f} className={filter === f ? "btn-primary" : "btn-outline"} style={{ fontSize: '0.7rem', padding: '4px 12px' }} onClick={() => setFilter(f)}>{f}</button>
@@ -175,29 +198,7 @@ export default function MarketPresence() {
         </table>
       </div>
 
-      {/* Tier Summary Dashboard */}
-      <div className="grid-cols-4" style={{ gap: '1rem' }}>
-        <div className="card" style={{ textAlign: 'center', border: '1px solid var(--primary)' }}>
-          <h4 style={{ color: 'var(--primary)', margin: '0 0 0.5rem 0' }}>Tier 1: Global</h4>
-          <div className="big-stat" style={{ color: 'var(--primary)' }}>{global.length}</div>
-          <p className="text-muted" style={{ fontSize: '0.8rem', margin: 0 }}>Public Discovery</p>
-        </div>
-        <div className="card" style={{ textAlign: 'center', border: '1px solid var(--purple)' }}>
-          <h4 style={{ color: 'var(--purple)', margin: '0 0 0.5rem 0' }}>Tier 2: Firm</h4>
-          <div className="big-stat" style={{ color: 'var(--purple)' }}>{firm.length}</div>
-          <p className="text-muted" style={{ fontSize: '0.8rem', margin: 0 }}>Membership Gated</p>
-        </div>
-        <div className="card" style={{ textAlign: 'center', border: '1px solid var(--success)' }}>
-          <h4 style={{ color: 'var(--success)', margin: '0 0 0.5rem 0' }}>Tier 3: Private</h4>
-          <div className="big-stat" style={{ color: 'var(--success)' }}>{invites.length}</div>
-          <p className="text-muted" style={{ fontSize: '0.8rem', margin: 0 }}>Whitelisted</p>
-        </div>
-        <div className="card" style={{ textAlign: 'center', border: '1px solid var(--warning)' }}>
-          <h4 style={{ color: 'var(--warning)', margin: '0 0 0.5rem 0' }}>Tier 4: Direct</h4>
-          <div className="big-stat" style={{ color: 'var(--warning)' }}>{directSubscriptions.length}</div>
-          <p className="text-muted" style={{ fontSize: '0.8rem', margin: 0 }}>Bilateral</p>
-        </div>
-      </div>
+    
     </div>
   );
 }
