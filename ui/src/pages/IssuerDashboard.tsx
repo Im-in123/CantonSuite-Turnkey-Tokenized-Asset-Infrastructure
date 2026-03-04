@@ -83,7 +83,7 @@ export default function IssuerDashboard() {
   // --- STATE ---
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newAsset, setNewAsset] = useState({ id: "", name: "", type: "Equity", supply: 1000, price: 10 });
-  const [selectedAsset, setSelectedAsset] = useState<RWAInstrument | null>(null);
+  const [selectedAsset, setSelectedAsset] = useState<any>(null);
   const [manageCid, setManageCid] = useState<any>(null);
   const [actionType, setActionType] = useState<"Mint" | "Burn" | "UpdatePrice">("Mint");
   const [actionValue, setActionValue] = useState(0);
@@ -192,17 +192,37 @@ export default function IssuerDashboard() {
     
     console.log('DEBUG: Executing', actionType, 'on contract:', manageCid);
     console.log('DEBUG: Selected asset:', selectedAsset);
+    console.log('DEBUG: Selected asset payload:', selectedAsset?.payload);
+    
+    if (!selectedAsset || !selectedAsset.payload) {
+      toast.showToast("Error: No asset selected. Please select an asset first.", "error");
+      return;
+    }
     
     setIsSubmitting(true);
     try {
         if (actionType === "Mint") {
           console.log('DEBUG: Attempting AtomicMintWithAudit approach');
+          const complianceParty = iam.getPartyByRole("ComplianceOfficer");
+          const regulatorParty = iam.getPartyByRole("Regulator");
+          
+          if (!complianceParty || !regulatorParty) {
+            toast.showToast("System Error: Required parties not found", "error");
+            return;
+          }
+          
+          const assetId = selectedAsset?.payload?.instrument?.id?.unpack || 'unknown';
+          if (!assetId || assetId === 'unknown') {
+            toast.showToast("Error: Invalid asset ID", "error");
+            return;
+          }
+          
           const auditContract = await ledger.create(AtomicMintWithAudit, {
             issuer: party, 
-            compliance: iam.getPartyByRole("ComplianceOfficer"),
-            regulator: iam.getPartyByRole("Regulator"), 
+            compliance: complianceParty,
+            regulator: regulatorParty, 
             recipient: party, 
-            assetId: selectedAsset?.payload.instrument?.id?.unpack || 'unknown',
+            assetId: assetId,
             quantity: actionValue.toFixed(1),
             mintReason: "Treasury Mint via Asset Management"
           });
@@ -211,7 +231,15 @@ export default function IssuerDashboard() {
         else if (actionType === "Burn") {
           console.log('DEBUG: Attempting AtomicBurnWithAudit approach');
           // For burn, we need to find a treasury holding first
-          const assetId = selectedAsset?.payload.instrument?.id?.unpack || 'unknown';
+          const assetId = selectedAsset?.payload?.instrument?.id?.unpack || 'unknown';
+          const complianceParty = iam.getPartyByRole("ComplianceOfficer");
+          const regulatorParty = iam.getPartyByRole("Regulator");
+          
+          if (!complianceParty || !regulatorParty) {
+            toast.showToast("System Error: Required parties not found", "error");
+            return;
+          }
+          
           const treasuryHoldings = await ledger.query(Holding_Impl, { owner: party, assetId: assetId });
           const treasuryHolding = treasuryHoldings.find(h => !h.payload.locked);
           if (!treasuryHolding) {
@@ -220,8 +248,8 @@ export default function IssuerDashboard() {
           
           const auditContract = await ledger.create(AtomicBurnWithAudit, {
             issuer: party, 
-            compliance: iam.getPartyByRole("ComplianceOfficer"),
-            regulator: iam.getPartyByRole("Regulator"), 
+            compliance: complianceParty,
+            regulator: regulatorParty, 
             burnHolder: party, 
             holdingCid: treasuryHolding.contractId as any,
             quantity: actionValue.toFixed(1), 
@@ -323,7 +351,7 @@ export default function IssuerDashboard() {
         </form>
       </Modal>
 
-      <Modal isOpen={!!selectedAsset} onClose={() => !isSubmitting && (setSelectedAsset(null), setManageCid(null))} title={`Manage ${selectedAsset?.name}`}>
+      <Modal isOpen={!!selectedAsset} onClose={() => !isSubmitting && (setSelectedAsset(null), setManageCid(null))} title={`Manage ${selectedAsset?.payload?.name || 'Asset'}`}>
           <form onSubmit={handleManagement}>
               <div style={{display:'flex', gap:'1rem', marginBottom:'1rem'}}>
                   <button 

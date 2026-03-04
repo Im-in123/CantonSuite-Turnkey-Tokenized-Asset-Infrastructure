@@ -240,7 +240,7 @@ export default function IssuerAssetTab({
                   })()}
                 </td>
                 <td>
-                  <button className="btn-outline" onClick={() => onManage(a.payload, a.contractId)}>Manage</button>
+                  <button className="btn-outline" onClick={() => onManage(a, a.contractId)}>Manage</button>
                   {onPublishToMarket && (() => {
                     const assetId = a.payload.instrument?.id?.unpack || a.payload.name || 'unknown';
                     const stats = assetStats[assetId] || { totalSupply: 0 };
