@@ -4,7 +4,8 @@ import { User } from "@daml.js/CantonSuite-0.1.0/lib/Users";
 import IssuerDashboard from "../pages/IssuerDashboard";
 import BuyerDashboard from "../pages/BuyerDashboard";
 import ComplianceDashboard from "../pages/ComplianceDashboard";
-import RegulatorDashboard from "../pages/RegulatorDashboard"; 
+import RegulatorDashboard from "../pages/RegulatorDashboard";
+import AdminDashboard from "../pages/AdminDashboard";
 import { useToast } from "../context/ToastContext";
 import CantonIAM from "../services/CantonIAM";
 import { LoadingSpinner } from "./LoadingSpinner";
@@ -47,6 +48,9 @@ const MainLayout: React.FC = () => {
 
   const { name, role } = userContract.payload;
 
+  // Check if this is an admin user (PlatformIssuer or special admin party)
+  const isAdmin = party.includes('PlatformIssuer') || party.includes('Admin');
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <nav style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border)', padding: '1rem 2rem' }}>
@@ -67,7 +71,8 @@ const MainLayout: React.FC = () => {
 
       <main className="container" style={{ flex: 1, marginTop: '2rem' }}>
         <>
-          {role === "Issuer" && <IssuerDashboard />}
+          {isAdmin && <AdminDashboard />}
+          {role === "Issuer" && !isAdmin && <IssuerDashboard />}
           {role === "Buyer" && <BuyerDashboard />}
           {role === "Compliance" && <ComplianceDashboard />}
           {role === "Regulator" && <RegulatorDashboard />}

@@ -40,7 +40,7 @@ infixl 1 |>
 ----------------------------------------------------------------------
 data SetupResult = SetupResult with
     issuer, compliance, regulator, discovery, alice, bob, bank, charlie, amuletApp, publicMarket : Party
-    aliceUser, bobUser : ContractId U.User
+    aliceUser, bobUser, charlieUser, issuerUser, complianceUser, regulatorUser, bankUser, discoveryUser, amuletUser, publicUser : ContractId U.User
     sanctionsRegistry : ContractId SanctionsRegistry
   deriving (Eq, Show)
 
@@ -93,6 +93,14 @@ setupEcosystem = script do
   
   aliceUser <- submit alice $ createCmd U.User with partyId = alice, name = "Alice", email = "a@c.io", role = Buyer
   bobUser <- submit bob $ createCmd U.User with partyId = bob, name = "Bob", email = "b@c.io", role = Buyer
+  charlieUser <- submit charlie $ createCmd U.User with partyId = charlie, name = "Charlie", email = "c@c.io", role = Buyer
+  issuerUser <- submit issuer $ createCmd U.User with partyId = issuer, name = "Platform Issuer", email = "issuer@canton.io", role = Issuer
+  complianceUser <- submit compliance $ createCmd U.User with partyId = compliance, name = "Compliance Officer", email = "compliance@canton.io", role = Compliance
+  regulatorUser <- submit regulator $ createCmd U.User with partyId = regulator, name = "Regulator", email = "regulator@canton.io", role = Regulator
+  bankUser <- submit bank $ createCmd U.User with partyId = bank, name = "Lending Bank", email = "bank@canton.io", role = Issuer
+  discoveryUser <- submit discovery $ createCmd U.User with partyId = discovery, name = "Discovery Service", email = "discovery@canton.io", role = Issuer
+  amuletUser <- submit amuletApp $ createCmd U.User with partyId = amuletApp, name = "Amulet App", email = "amulet@canton.io", role = Issuer
+  publicUser <- submit publicMarket $ createCmd U.User with partyId = publicMarket, name = "Public Market", email = "market@canton.io", role = Issuer
   
   _ <- submitMulti [alice, compliance] [] $ createCmd K.KYC with buyer = alice, compliance = compliance, status = KApproved
   _ <- submitMulti [charlie, compliance] [] $ createCmd K.KYC with buyer = charlie, compliance = compliance, status = KApproved
@@ -101,7 +109,13 @@ setupEcosystem = script do
   now <- getTime
   sanctionsRegistry <- submit compliance $ createCmd SanctionsRegistry with compliance = compliance, regulator = regulator, sanctionedHashes = [], lastUpdated = now, listVersion = "v1"
   
-  return SetupResult with ..
+  return SetupResult with
+    issuer = issuer, compliance = compliance, regulator = regulator, discovery = discovery,
+      alice = alice, bob = bob, bank = bank, charlie = charlie, amuletApp = amuletApp, publicMarket = publicMarket,
+      aliceUser = aliceUser, bobUser = bobUser, charlieUser = charlieUser,
+      issuerUser = issuerUser, complianceUser = complianceUser, regulatorUser = regulatorUser,
+      bankUser = bankUser, discoveryUser = discoveryUser, amuletUser = amuletUser, publicUser = publicUser,
+      sanctionsRegistry = sanctionsRegistry
 
 runAssetGenesisAndMaintenance : SetupResult -> Script AssetResult
 runAssetGenesisAndMaintenance setup = script do

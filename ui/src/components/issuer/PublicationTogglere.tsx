@@ -10,7 +10,7 @@ export default function PublicationTogglere() {
   const ledger = useLedger();
   const toast = useToast();
 
-  const { contracts: assets } = useStreamQueries(RWAInstrument, () => [{ tokenIssuer: party }]);
+  const { contracts: assets } = useStreamQueries(RWAInstrument);
   
   const [selectedAsset, setSelectedAsset] = useState<any>(null);
   const [tier, setTier] = useState<"GlobalTier" | "FirmOnlyTier" | "SelectedTier" | "DirectTier">("GlobalTier");
@@ -27,7 +27,7 @@ export default function PublicationTogglere() {
       const listingPayload = {
         listingId: "LIST-" + Date.now(),
         issuer: party,
-        assetId: selectedAsset.payload.instrument.id.unpack,
+        assetId: selectedAsset.payload.instrument && selectedAsset.payload.instrument._1 ? selectedAsset.payload.instrument._1._2 : 'unknown',
         instrumentCid: selectedAsset.contractId,
         quantity: quantity,
         pricePerUnit: selectedAsset.payload.pricePerUnit,
@@ -58,7 +58,7 @@ export default function PublicationTogglere() {
         {assets.map(a => (
           <div key={a.contractId} className="card" style={{ background: 'var(--bg-dark)', border: '1px solid var(--border)' }}>
             <div className="flex-between">
-              <span className="badge badge-blue">{a.payload.instrument.id.unpack}</span>
+              <span className="badge badge-blue">{a.payload.instrument && a.payload.instrument._1 ? a.payload.instrument._1._2 : 'unknown'}</span>
               <button className="btn-primary" style={{ padding: '4px 12px' }} onClick={() => setSelectedAsset(a)}>Publish</button>
             </div>
           </div>

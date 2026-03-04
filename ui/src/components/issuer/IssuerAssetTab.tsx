@@ -24,15 +24,30 @@ export default function IssuerAssetTab({
   const [fractionalFilter, setFractionalFilter] = useState("All");
 
   const filteredAssets = useMemo(() => {
-    return assets.filter(a => {
+    console.log('DEBUG: Total assets received:', assets.length);
+    console.log('DEBUG: Assets:', assets);
+    
+    // First filter for assets with proper structure, then apply search/filter
+    const validAssets = assets.filter(a => {
+      const isValid = a.payload && a.payload.instrument && a.payload.instrument._1;
+      console.log('DEBUG: Asset validity check:', isValid, a.payload?.name);
+      return isValid;
+    });
+    console.log('DEBUG: Valid assets after structure check:', validAssets.length);
+    
+    const finalFiltered = validAssets.filter(a => {
       const matchesSearch = 
         a.payload.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        a.payload.assetId.toLowerCase().includes(searchTerm.toLowerCase());
+        a.payload.instrument._1._2.toLowerCase().includes(searchTerm.toLowerCase());
       const matchesFilter = 
         fractionalFilter === "All" || 
         (fractionalFilter === "Fractionalized" ? a.payload.fractionalized : !a.payload.fractionalized);
+      console.log('DEBUG: Search match:', matchesSearch, 'Filter match:', matchesFilter, 'Asset:', a.payload.name);
       return matchesSearch && matchesFilter;
     });
+    console.log('DEBUG: Final filtered assets:', finalFiltered.length);
+    
+    return finalFiltered;
   }, [assets, searchTerm, fractionalFilter]);
 
   return (
@@ -53,7 +68,7 @@ export default function IssuerAssetTab({
             <tbody>
               {drafts.map(d => (
                 <tr key={d.contractId}>
-                  <td>{d.payload.assetId}</td>
+                  <td>{d.payload.instrument._1._2}</td>
                   <td>{d.payload.name}</td>
                   <td>{Number(d.payload.totalSupply).toLocaleString()}</td>
                   <td><span className="badge badge-yellow">Under Review</span></td>
@@ -78,14 +93,14 @@ export default function IssuerAssetTab({
         </div>
 
         <table>
-          <thead><tr><th>ID</th><th>Name</th><th>Supply</th><th>Price</th><th>Frac.</th><th>Actions</th></tr></thead>
+          <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Price</th><th>Frac.</th><th>Actions</th></tr></thead>
           <tbody>
             {filteredAssets.length === 0 && <tr><td colSpan={6} className="text-muted">No assets found matching criteria.</td></tr>}
-            {filteredAssets.map(a => (
+            {filteredAssets.filter(a => a.payload && a.payload.instrument && a.payload.instrument._1).map(a => (
               <tr key={a.contractId}>
-                <td>{a.payload.assetId}</td>
+                <td>{a.payload.instrument._1._2}</td>
                 <td>{a.payload.name}</td>
-                <td>{Number(a.payload.availableSupply).toLocaleString()} / {Number(a.payload.totalSupply).toLocaleString()}</td>
+                <td>{a.payload.assetType}</td>
                 <td>${Number(a.payload.pricePerUnit).toFixed(2)}</td>
                 <td>
                   <span 
@@ -115,9 +130,9 @@ export default function IssuerAssetTab({
               {requests.length === 0 && <tr><td colSpan={4} className="text-muted">No pending requests</td></tr>}
               {requests.map(r => (
                 <tr key={r.contractId}>
-                  <td>{r.payload.assetId}</td>
-                  <td>{r.payload.buyer.split("::")[0]}</td>
-                  <td>{Number(r.payload.quantity).toLocaleString()}</td>
+                  <td>{r.payload.instrument ? r.payload.instrument._1._2 : 'N/A'}</td>
+                  <td>{r.payload.buyer ? r.payload.buyer.split("::")[0] : 'N/A'}</td>
+                  <td>{r.payload.quantity ? Number(r.payload.quantity).toLocaleString() : 'N/A'}</td>
                   <td>
                     <button 
                       className="btn-primary" 
@@ -145,9 +160,9 @@ export default function IssuerAssetTab({
                 <tbody>
                   {pendingSettlements.map(t => (
                     <tr key={t.contractId}>
-                      <td>{t.payload.assetId}</td>
-                      <td>{t.payload.buyer.split("::")[0]}</td>
-                      <td>${(Number(t.payload.quantity) * Number(t.payload.pricePerUnit)).toLocaleString()}</td>
+                      <td>{t.payload.instrument ? t.payload.instrument._1._2 : 'N/A'}</td>
+                      <td>{t.payload.buyer ? t.payload.buyer.split("::")[0] : 'N/A'}</td>
+                      <td>{t.payload.quantity && t.payload.pricePerUnit ? `$${(Number(t.payload.quantity) * Number(t.payload.pricePerUnit)).toLocaleString()}` : 'N/A'}</td>
                       <td><span className="badge badge-yellow" style={{fontSize: '0.7rem'}}>Pending</span></td>
                     </tr>
                   ))}
@@ -164,8 +179,8 @@ export default function IssuerAssetTab({
               {settlements.length === 0 && <tr><td colSpan={3} className="text-muted">No trades ready for settlement</td></tr>}
               {settlements.map(a => (
                 <tr key={a.contractId}>
-                  <td>{a.payload.assetId}</td>
-                  <td>${(Number(a.payload.quantity) * Number(a.payload.pricePerUnit)).toLocaleString()}</td>
+                  <td>{a.payload.instrument ? a.payload.instrument._1._2 : 'N/A'}</td>
+                  <td>{a.payload.quantity && a.payload.pricePerUnit ? `$${(Number(a.payload.quantity) * Number(a.payload.pricePerUnit)).toLocaleString()}` : 'N/A'}</td>
                   <td>
                     <button 
                       className="btn-success" 

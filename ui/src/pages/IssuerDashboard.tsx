@@ -49,23 +49,23 @@ export default function IssuerDashboard() {
   const myAssets = allAssets.filter(a => a.payload.tokenIssuer === party);
 
   const { contracts: drafts } = useStreamQueries(DraftRWAInstrument);
-  const { contracts: allocations } = useStreamQueries(Allocation, () => [{ issuer: party }]);
-  const { contracts: redemptionRequests, loading: redLoading } = useStreamQueries(RedemptionRequest, () => [{ issuer: party }]);
-  const { contracts: workflows } = useStreamQueries(DividendAnnouncementWorkflow, () => [{ issuer: party }]);
+  const { contracts: allocations } = useStreamQueries(Allocation);
+  const { contracts: redemptionRequests, loading: redLoading } = useStreamQueries(RedemptionRequest);
+  const { contracts: workflows } = useStreamQueries(DividendAnnouncementWorkflow);
   
   // --- LENDING QUERY HOOKS ---
-  const { contracts: pools } = useStreamQueries(LendingPoolPool, () => [{ poolOperator: party }]);
-  const { contracts: loanRequests } = useStreamQueries(LoanRequest, () => [{ poolOperator: party }]);
-  const { contracts: depositRequests } = useStreamQueries(DepositRequest, () => [{ poolOperator: party }]);
-  const { contracts: withdrawalRequests } = useStreamQueries(WithdrawalRequest, () => [{ poolOperator: party }]);
+  const { contracts: pools } = useStreamQueries(LendingPoolPool);
+  const { contracts: loanRequests } = useStreamQueries(LoanRequest);
+  const { contracts: depositRequests } = useStreamQueries(DepositRequest);
+  const { contracts: withdrawalRequests } = useStreamQueries(WithdrawalRequest);
   
   const ProposedTemplate = Trade.ProposedTrade || Trade.TradeAgreement;
   const ApprovedTemplate = Trade.ApprovedTrade || Trade.TradeAgreement;
   const AgreementTemplate = Trade.TradeAgreement; 
   
-  const { contracts: requests, loading: reqLoading } = useStreamQueries(ProposedTemplate, () => [{ seller: party }]);
-  const { contracts: pendingSettlements } = useStreamQueries(AgreementTemplate, () => [{ assetIssuer: party }]);
-  const { contracts: settlements } = useStreamQueries(ApprovedTemplate, () => [{ assetIssuer: party }]);
+  const { contracts: requests, loading: reqLoading } = useStreamQueries(ProposedTemplate);
+  const { contracts: pendingSettlements } = useStreamQueries(AgreementTemplate);
+  const { contracts: settlements } = useStreamQueries(ApprovedTemplate);
   
   useStreamNotification(requests, "Buy Order", reqLoading);
   useStreamNotification(redemptionRequests, "Redemption Request", redLoading);
@@ -273,8 +273,8 @@ export default function IssuerDashboard() {
             <label>Asset ID</label>
             <select className="input-field" value={yieldForm.assetId} onChange={e => setYieldForm({...yieldForm, assetId: e.target.value})} required disabled={isSubmitting}>
               <option value="">Select Asset</option>
-              {/* UPDATED: Only show my assets in the dropdown */}
-              {myAssets.map(a => (<option key={a.contractId} value={String(a.payload.instrument._1._2)}>{a.payload.name} ({a.payload.instrument._1._2})</option>))}
+              {/* UPDATED: Only show my assets in the dropdown with safety checks */}
+              {myAssets.filter(a => a.payload && a.payload.instrument && a.payload.instrument._1).map(a => (<option key={a.contractId} value={String(a.payload.instrument._1._2)}>{a.payload.name} ({a.payload.instrument._1._2})</option>))}
             </select>
             {yieldForm.assetId && (
               <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--info)', background: 'rgba(59, 130, 246, 0.1)', padding: '0.5rem', borderRadius: '4px' }}>

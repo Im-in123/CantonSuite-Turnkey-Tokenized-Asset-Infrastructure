@@ -22,10 +22,10 @@ export default function AssetManager() {
   const iam = CantonIAM.getInstance();
 
   // --- DATA STREAMS ---
-  const { contracts: assets } = useStreamQueries(RWAInstrument, () => [{ tokenIssuer: party }]);
-  const { contracts: drafts } = useStreamQueries(DraftRWAInstrument, () => [{ draftIssuer: party }]);
+  const { contracts: assets } = useStreamQueries(RWAInstrument);
+  const { contracts: drafts } = useStreamQueries(DraftRWAInstrument);
   const { contracts: allHoldings } = useStreamQueries(Holding_Impl);
-  const { contracts: govPolicies } = useStreamQueries(FractionalizationGovernance, () => [{ issuer: party }]);
+  const { contracts: govPolicies } = useStreamQueries(FractionalizationGovernance);
   
   // --- UI STATE ---
   const [selectedAsset, setSelectedAsset] = useState<any>(null);
@@ -35,7 +35,10 @@ export default function AssetManager() {
   // --- LOGIC: TREASURY vs TOTAL SUPPLY ---
   const assetStats = useMemo(() => {
     const stats: Record<string, { inTreasury: number; totalSupply: number; treasuryCid: string | null }> = {};
-    assets.forEach(a => { stats[a.payload.instrument.id.unpack] = { inTreasury: 0, totalSupply: 0, treasuryCid: null }; });
+    assets.forEach(a => { 
+      const instrumentId = a.payload.instrument && a.payload.instrument._1 ? a.payload.instrument._1._2 : 'unknown';
+      stats[instrumentId] = { inTreasury: 0, totalSupply: 0, treasuryCid: null }; 
+    });
     allHoldings.forEach(h => {
       const ticker = h.payload.assetId;
       if (!stats[ticker]) return;
@@ -66,7 +69,7 @@ export default function AssetManager() {
       const auditContract = await ledger.create(AtomicMintWithAudit, {
         issuer: party, compliance: iam.getPartyByRole("ComplianceOfficer"),
         regulator: iam.getPartyByRole("Regulator"), recipient: party, 
-        assetId: selectedAsset.payload.instrument.id.unpack, quantity: amount,
+        assetId: selectedAsset.payload.instrument && selectedAsset.payload.instrument._1 ? selectedAsset.payload.instrument._1._2 : 'unknown', quantity: amount,
         mintReason: "Institutional Capital Increase"
       });
       await ledger.exercise(AtomicMintWithAudit.ExecuteAtomicMint, auditContract.contractId, {});
@@ -77,7 +80,7 @@ export default function AssetManager() {
   };
 
   const handleBurnFromTreasury = async (amount: string) => {
-    const ticker = selectedAsset?.payload.instrument.id.unpack;
+    const ticker = selectedAsset?.payload.instrument && selectedAsset.payload.instrument._1 ? selectedAsset.payload.instrument._1._2 : 'unknown';
     const stats = assetStats[ticker];
     if (!stats?.treasuryCid) return;
     setLoading(true);

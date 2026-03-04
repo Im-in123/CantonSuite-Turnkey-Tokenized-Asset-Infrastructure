@@ -98,8 +98,11 @@ class CantonIAM {
     const partyMapping: Record<string, string> = {};
     const resultList = data.result || [];
     
-    // Map known roles to their full party IDs
-    const knownRoles = ['Issuer1', 'Issuer2', 'Alice', 'Bob', 'Compliance', 'Regulator', 'Public'];
+    // Map known roles to their full party IDs - Updated to match startup script
+    const knownRoles = [
+      'PlatformIssuer', 'ComplianceOfficer', 'Regulator', 'Alice', 'Bob', 
+      'Charlie', 'LendingBank', 'Discovery_Service', 'AmuletApp', 'PublicMarket'
+    ];
     
     resultList.forEach((detail: any) => {
       const fullPartyId = detail.identifier;

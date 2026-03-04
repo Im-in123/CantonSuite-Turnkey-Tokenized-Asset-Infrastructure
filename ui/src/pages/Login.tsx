@@ -7,12 +7,16 @@ interface LoginProps {
 }
 
 const DEFAULT_ROLES = [
-  { name: "Issuer1", color: "#3b82f6", desc: "Tech Asset Manager" },
-  { name: "Issuer2", color: "#2563eb", desc: "Real Estate Manager" },
+  { name: "PlatformIssuer", color: "#3b82f6", desc: "System Administrator" },
+  { name: "ComplianceOfficer", color: "#8b5cf6", desc: "Internal Control" },
+  { name: "Regulator", color: "#f59e0b", desc: "Audit & Oversight" },
   { name: "Alice", color: "#10b981", desc: "Buyer (Wealthy)" },
   { name: "Bob", color: "#10b981", desc: "Buyer (Retail)" },
-  { name: "Compliance", color: "#8b5cf6", desc: "Internal Control" },
-  { name: "Regulator", color: "#f59e0b", desc: "Audit & Oversight" },
+  { name: "Charlie", color: "#10b981", desc: "Buyer (Institutional)" },
+  { name: "LendingBank", color: "#ef4444", desc: "Lending Provider" },
+  { name: "Discovery_Service", color: "#6366f1", desc: "Marketplace Discovery" },
+  { name: "AmuletApp", color: "#ec4899", desc: "Mining App" },
+  { name: "PublicMarket", color: "#6b7280", desc: "Public Market Access" },
 ];
 
 export default function Login({ onLogin }: LoginProps) {

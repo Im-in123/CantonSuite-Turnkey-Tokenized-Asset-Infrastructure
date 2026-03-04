@@ -51,7 +51,7 @@ export default function BuyerDashboard() {
   const { contracts: assets } = useStreamQueries(RWAInstrument);
   const { contracts: allocations } = useStreamQueries(Allocation);
   const { contracts: redemptionRequests } = useStreamQueries(RedemptionRequest, () => [{ buyer: party }]);
-  const { contracts: dividends, loading: divLoading } = useStreamQueries(Dividend, () => [{ owner: party }]);
+  const { contracts: dividends, loading: divLoading } = useStreamQueries(DividendClaim);
   
   // --- LENDING QUERY HOOKS ---
   const { contracts: pools } = useStreamQueries(LendingPoolPool);
@@ -113,13 +113,13 @@ export default function BuyerDashboard() {
   const isPending = !isApproved && !isRejected && kycContracts.some(k => k.payload.status === "KPending");
 
   const portfolioValue = allocations.reduce((total, allocation) => {
-    const asset = assets.find(a => a.payload.assetId === allocation.payload.assetId);
+    const asset = assets.find(a => a.payload.instrument._1._2 === allocation.payload.instrument._1._2);
     const price = asset ? Number(asset.payload.pricePerUnit) : 0;
     const qty = Number(allocation.payload.quantity);
     return total + (price * qty);
   }, 0);
 
-  const totalUnclaimedYield = dividends.reduce((sum, div) => sum + Number(div.payload.cashAmount), 0);
+  const totalUnclaimedYield = dividends.reduce((sum, div) => sum + Number(div.payload.amount), 0);
 
   const getParty = (role: string) => {
       return iam.getPartyByRole(role);
@@ -310,8 +310,8 @@ export default function BuyerDashboard() {
     if (claimingIds.has(dividend.contractId)) return;
     setClaimingIds(prev => new Set(prev).add(dividend.contractId));
     try {
-      await ledger.exercise(Dividend.ClaimDividend, dividend.contractId, {});
-      toast.showToast(`Claimed ${Number(dividend.payload.cashAmount).toFixed(2)}`, "success");
+      await ledger.exercise(DividendClaim.ClaimDividend, dividend.contractId, {});
+      toast.showToast(`Claimed ${Number(dividend.payload.amount).toFixed(2)}`, "success");
     } catch (err: any) {
       if (!err.message?.includes("CONTRACT_NOT_ACTIVE")) {
         toast.showToast("Failed to claim: " + err.message, "error");
