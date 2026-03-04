@@ -1,10 +1,11 @@
 import React, { useState, useMemo } from "react";
 import { useLedger, useStreamQueries } from "@daml/react";
-import { KYC } from "@daml.js/CantonSuite-0.0.1/lib/KYC";
-import { TradeAgreement } from "@daml.js/CantonSuite-0.0.1/lib/Trade";
-import { DraftAsset } from "@daml.js/CantonSuite-0.0.1/lib/Assets";
-import { Dividend } from "@daml.js/CantonSuite-0.0.1/lib/Distribution"; 
-import { LoanRequest, Loan } from "@daml.js/CantonSuite-0.0.1/lib/Lending";
+import { KYC } from "@daml.js/CantonSuite-0.1.0/lib/KYC";
+import { TradeAgreement } from "@daml.js/CantonSuite-0.1.0/lib/Trade";
+import { DraftRWAInstrument } from "@daml.js/CantonSuite-0.1.0/lib/Finance/Instruments";
+import { DividendClaim, DividendAnnouncementWorkflow } from "@daml.js/CantonSuite-0.1.0/lib/Distribution/ClaimBased"; 
+import { LoanRequest, Loan } from "@daml.js/CantonSuite-0.1.0/lib/Lending/Loans";
+import { SanctionsRegistry, SanctionsClearance } from "@daml.js/CantonSuite-0.1.0/lib/Compliance/SanctionsRegistry";
 import { useToast } from "../context/ToastContext";
 import { useStreamNotification } from "../hooks/useStreamNotification";
 import CantonIAM from "../services/CantonIAM";
@@ -14,7 +15,10 @@ export default function ComplianceDashboard() {
   const toast = useToast();
   const iam = CantonIAM.getInstance();
 
-  const [activeTab, setActiveTab] = useState<"kyc" | "trades" | "lending" | "yields">("kyc");
+  const [activeTab, setActiveTab] = useState<"kyc" | "trades" | "lending" | "yields" | "sanctions">("kyc");
+  const [showSanctionsModal, setShowSanctionsModal] = useState(false);
+  const [showClearanceModal, setShowClearanceModal] = useState(false);
+  const [selectedSanction, setSelectedSanction] = useState<any>(null);
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
   
   const [kycSearch, setKycSearch] = useState("");
@@ -23,8 +27,11 @@ export default function ComplianceDashboard() {
   // --- QUERIES ---
   const { contracts: kycRequests, loading: kycLoading } = useStreamQueries(KYC);
   const { contracts: tradeAgreements, loading: tradesLoading } = useStreamQueries(TradeAgreement);
-  const { contracts: draftAssets, loading: assetsLoading } = useStreamQueries(DraftAsset);
-  const { contracts: dividends, loading: divLoading } = useStreamQueries(Dividend);
+  const { contracts: draftAssets, loading: assetsLoading } = useStreamQueries(DraftRWAInstrument);
+  const { contracts: dividends, loading: divLoading } = useStreamQueries(DividendClaim);
+  const { contracts: sanctionsRegistries } = useStreamQueries(SanctionsRegistry);
+  const { contracts: sanctionsClearances } = useStreamQueries(SanctionsClearance);
+  const { contracts: dividendWorkflows } = useStreamQueries(DividendAnnouncementWorkflow);
   const { contracts: loanRequests } = useStreamQueries(LoanRequest);
   const { contracts: activeLoans } = useStreamQueries(Loan); 
 
@@ -65,7 +72,86 @@ export default function ComplianceDashboard() {
       } finally {
           setProcessingIds(prev => { const next = new Set(prev); next.delete(cid); return next; });
       }
-  }
+  };
+
+  // --- SANCTIONS MANAGEMENT FUNCTIONS ---
+  const handleAddSanctionedEntity = async (partyHash: string, reason: string) => {
+    if (!partyHash || !reason) return;
+    
+    try {
+      const registry = sanctionsRegistries[0];
+      if (registry) {
+        await ledger.exercise(SanctionsRegistry.AddSanctionedEntity, registry.contractId, {
+          partyHash,
+          reason
+        });
+        toast.showToast("Entity added to sanctions list", "success");
+      } else {
+        toast.showToast("No sanctions registry found", "error");
+      }
+    } catch (e: any) {
+      toast.showToast(e.message, "error");
+    }
+  };
+
+  const handleRemoveSanctionedEntity = async (partyHash: string) => {
+    try {
+      const registry = sanctionsRegistries[0];
+      if (registry) {
+        await ledger.exercise(SanctionsRegistry.RemoveSanctionedEntity, registry.contractId, {
+          partyHash
+        });
+        toast.showToast("Entity removed from sanctions list", "success");
+      }
+    } catch (e: any) {
+      toast.showToast(e.message, "error");
+    }
+  };
+
+  const handleIssueClearance = async (partyToCheck: string, tradeId: string, settlementWindow: number) => {
+    try {
+      const registry = sanctionsRegistries[0];
+      if (registry) {
+        await ledger.exercise(SanctionsRegistry.IssueClearance, registry.contractId, {
+          partyToCheck,
+          tradeId,
+          settlementWindow
+        });
+        toast.showToast(`Clearance issued for ${partyToCheck}`, "success");
+      }
+    } catch (e: any) {
+      toast.showToast(e.message, "error");
+    }
+  };
+
+  const handleConsumeClearance = async (clearanceCid: string) => {
+    try {
+      await ledger.exercise(SanctionsClearance.ConsumeClearance, clearanceCid, {});
+      toast.showToast("Clearance consumed", "success");
+    } catch (e: any) {
+      toast.showToast(e.message, "error");
+    }
+  };
+
+  // --- DIVIDEND ANNOUNCEMENT CREATION ---
+  const handleCreateAnnouncement = async (workflowCid: string, totalUnitsOutstanding: number, uniqueAnnouncementId: string, holdersAtSnapshot: string[]) => {
+    try {
+      const workflow = dividendWorkflows.find(w => w.contractId === workflowCid);
+      if (!workflow) {
+        toast.showToast("Workflow not found", "error");
+        return;
+      }
+      
+      await ledger.exercise(DividendAnnouncementWorkflow.CreateAnnouncement, workflowCid, {
+        totalUnitsOutstanding,
+        uniqueAnnouncementId,
+        holdersAtSnapshot
+      });
+      toast.showToast("Dividend announcement created and published", "success");
+    } catch (e: any) {
+      toast.showToast(e.message, "error");
+    }
+  };
 
   const tabStyle = (active: boolean) => ({
     padding: '0.8rem 1.5rem', 
@@ -100,6 +186,7 @@ export default function ComplianceDashboard() {
           Lending Risk {loanRequests.length > 0 && <span className="badge badge-yellow">{loanRequests.length}</span>}
         </button>
         <button onClick={() => setActiveTab("yields")} style={tabStyle(activeTab === "yields")}>AML Yield Audit</button>
+        <button onClick={() => setActiveTab("sanctions")} style={tabStyle(activeTab === "sanctions")}>🛡️ Sanctions Registry {sanctionsRegistries.length > 0 && <span className="badge badge-blue">{sanctionsRegistries[0]?.payload.sanctionedHashes?.length || 0}</span>}</button>
       </div>
 
       {/* TAB CONTENT: KYC & ASSETS */}
@@ -252,23 +339,256 @@ export default function ComplianceDashboard() {
 
       {/* TAB CONTENT: YIELDS */}
       {activeTab === 'yields' && (
-        <div className="card">
-          <h3 style={{marginBottom: '1rem'}}>Dividend Payment Log (AML Check)</h3>
-          <table>
-            <thead><tr><th>Recipient (Real ID)</th><th>Asset</th><th>Amount</th><th>Status</th><th>Date</th></tr></thead>
-            <tbody>
-              {dividends.length === 0 && <tr><td colSpan={5} className="text-muted" style={{textAlign:'center', padding:'2rem'}}>No dividends distributed yet.</td></tr>}
-              {dividends.map(d => (
-                <tr key={d.contractId}>
-                  <td style={{fontWeight: 'bold', color: 'var(--primary)'}}>{d.payload.owner.split("::")[0]}</td>
-                  <td>{d.payload.assetId}</td>
-                  <td style={{color: 'var(--success)', fontWeight:'bold'}}>${Number(d.payload.cashAmount).toFixed(2)}</td>
-                  <td><span className="badge badge-green">Issued</span></td>
-                  <td style={{color: 'var(--text-muted)'}}>{new Date(d.payload.issuedAt).toLocaleDateString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2rem" }}>
+          {/* DIVIDEND WORKFLOWS */}
+          <div className="card">
+            <h3>📋 Pending Dividend Workflows</h3>
+            <table>
+              <thead><tr><th>Issuer</th><th>Asset</th><th>Per Unit</th><th>Action</th></tr></thead>
+              <tbody>
+                {dividendWorkflows.length === 0 && (
+                  <tr><td colSpan={4} className="text-muted">No pending workflows</td></tr>
+                )}
+                {dividendWorkflows.map(workflow => (
+                  <tr key={workflow.contractId}>
+                    <td>{workflow.payload.issuer.split('::')[0]}</td>
+                    <td>{workflow.payload.assetId}</td>
+                    <td>${workflow.payload.perUnitAmount}</td>
+                    <td>
+                      <button 
+                        className="btn-primary" 
+                        style={{fontSize: '0.7rem', padding: '0.25rem 0.5rem'}}
+                        onClick={() => {
+                          // For demo, use mock data - in production, get from backend
+                          const totalUnits = 1000;
+                          const announcementId = `DIV_${Date.now()}`;
+                          const holders = ["Alice", "Bob", "Charlie"]; // Mock holders
+                          handleCreateAnnouncement(workflow.contractId, totalUnits, announcementId, holders);
+                        }}
+                      >
+                        Create Announcement
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* DIVIDEND PAYMENTS */}
+          <div className="card">
+            <h3>💰 Dividend Payment Log (AML Check)</h3>
+            <table>
+              <thead><tr><th>Recipient (Real ID)</th><th>Asset</th><th>Amount</th><th>Status</th><th>Date</th></tr></thead>
+              <tbody>
+                {dividends.length === 0 && <tr><td colSpan={5} className="text-muted" style={{textAlign:'center', padding:'2rem'}}>No dividends distributed yet.</td></tr>}
+                {dividends.map(d => (
+                  <tr key={d.contractId}>
+                    <td style={{fontWeight: 'bold', color: 'var(--primary)'}}>{d.payload.owner.split("::")[0]}</td>
+                    <td>{d.payload.assetId}</td>
+                    <td style={{color: 'var(--success)', fontWeight:'bold'}}>${Number(d.payload.cashAmount).toFixed(2)}</td>
+                    <td><span className="badge badge-green">Issued</span></td>
+                    <td style={{color: 'var(--text-muted)'}}>{new Date(d.payload.issuedAt).toLocaleDateString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB CONTENT: SANCTIONS */}
+      {activeTab === 'sanctions' && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2rem" }}>
+          {/* SANCTIONS REGISTRY */}
+          <div className="card">
+            <div className="flex-between" style={{marginBottom: '1rem'}}>
+              <h3>🛡️ Sanctions Registry</h3>
+              <button 
+                className="btn-primary" 
+                onClick={() => setShowSanctionsModal(true)}
+                style={{fontSize: '0.8rem'}}
+              >
+                + Add Entity
+              </button>
+            </div>
+            
+            {sanctionsRegistries.length === 0 ? (
+              <div style={{textAlign: 'center', padding: '2rem', color: 'var(--text-muted)'}}>
+                No sanctions registry found.
+              </div>
+            ) : (
+              <table>
+                <thead><tr><th>Party Hash</th><th>Reason</th><th>Action</th></tr></thead>
+                <tbody>
+                  {sanctionsRegistries[0]?.payload.sanctionedHashes?.length === 0 && (
+                    <tr><td colSpan={3} className="text-muted">No sanctioned entities</td></tr>
+                  )}
+                  {sanctionsRegistries[0]?.payload.sanctionedHashes?.map((hash: string, index: number) => (
+                    <tr key={index}>
+                      <td style={{fontFamily: 'monospace', fontSize: '0.8rem'}}>{hash.substring(0, 16)}...</td>
+                      <td>Sanctioned Entity</td>
+                      <td>
+                        <button 
+                          className="btn-outline" 
+                          style={{fontSize: '0.7rem', padding: '0.25rem 0.5rem'}}
+                          onClick={() => handleRemoveSanctionedEntity(hash)}
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* SANCTIONS CLEARANCES */}
+          <div className="card">
+            <div className="flex-between" style={{marginBottom: '1rem'}}>
+              <h3>📋 Active Clearances</h3>
+              <button 
+                className="btn-outline" 
+                onClick={() => setShowClearanceModal(true)}
+                style={{fontSize: '0.8rem'}}
+              >
+                + Issue Clearance
+              </button>
+            </div>
+            
+            <table>
+              <thead><tr><th>Party</th><th>Trade ID</th><th>Expires</th><th>Status</th><th>Action</th></tr></thead>
+              <tbody>
+                {sanctionsClearances.length === 0 && (
+                  <tr><td colSpan={5} className="text-muted">No active clearances</td></tr>
+                )}
+                {sanctionsClearances.map(clearance => (
+                  <tr key={clearance.contractId}>
+                    <td>{clearance.payload.clearedParty.split('::')[0]}</td>
+                    <td style={{fontFamily: 'monospace', fontSize: '0.8rem'}}>{clearance.payload.tradeId.substring(0, 12)}...</td>
+                    <td>{new Date(clearance.payload.expiresAt).toLocaleString()}</td>
+                    <td>
+                      <span className={`badge ${clearance.payload.consumed ? 'badge-red' : 'badge-green'}`}>
+                        {clearance.payload.consumed ? 'Consumed' : 'Active'}
+                      </span>
+                    </td>
+                    <td>
+                      {!clearance.payload.consumed && (
+                        <button 
+                          className="btn-outline" 
+                          style={{fontSize: '0.7rem', padding: '0.25rem 0.5rem'}}
+                          onClick={() => handleConsumeClearance(clearance.contractId)}
+                        >
+                          Consume
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ADD SANCTION MODAL */}
+      {showSanctionsModal && (
+        <div className="modal-overlay" onClick={() => setShowSanctionsModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{maxWidth: '500px'}}>
+            <div className="flex-between" style={{marginBottom: '1rem'}}>
+              <h4>Add Sanctioned Entity</h4>
+              <button className="btn-secondary" onClick={() => setShowSanctionsModal(false)}>×</button>
+            </div>
+            
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const formData = new FormData(e.currentTarget);
+              const partyHash = formData.get('partyHash') as string;
+              const reason = formData.get('reason') as string;
+              handleAddSanctionedEntity(partyHash, reason);
+              setShowSanctionsModal(false);
+              e.currentTarget.reset();
+            }} className="flex-column" style={{gap: '1rem'}}>
+              <div>
+                <label>Party Hash (SHA-256)</label>
+                <input 
+                  name="partyHash" 
+                  type="text" 
+                  className="input-field" 
+                  placeholder="Enter SHA-256 hash of party"
+                  required 
+                />
+              </div>
+              <div>
+                <label>Reason</label>
+                <textarea 
+                  name="reason" 
+                  className="input-field" 
+                  placeholder="Reason for sanction"
+                  required
+                  style={{minHeight: '80px'}}
+                />
+              </div>
+              <button type="submit" className="btn-primary">Add to Sanctions List</button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ISSUE CLEARANCE MODAL */}
+      {showClearanceModal && (
+        <div className="modal-overlay" onClick={() => setShowClearanceModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{maxWidth: '500px'}}>
+            <div className="flex-between" style={{marginBottom: '1rem'}}>
+              <h4>Issue Sanctions Clearance</h4>
+              <button className="btn-secondary" onClick={() => setShowClearanceModal(false)}>×</button>
+            </div>
+            
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const formData = new FormData(e.currentTarget);
+              const partyToCheck = formData.get('partyToCheck') as string;
+              const tradeId = formData.get('tradeId') as string;
+              const settlementWindow = parseInt(formData.get('settlementWindow') as string);
+              handleIssueClearance(partyToCheck, tradeId, settlementWindow);
+              setShowClearanceModal(false);
+              e.currentTarget.reset();
+            }} className="flex-column" style={{gap: '1rem'}}>
+              <div>
+                <label>Party to Clear</label>
+                <input 
+                  name="partyToCheck" 
+                  type="text" 
+                  className="input-field" 
+                  placeholder="Party identifier"
+                  required 
+                />
+              </div>
+              <div>
+                <label>Trade ID</label>
+                <input 
+                  name="tradeId" 
+                  type="text" 
+                  className="input-field" 
+                  placeholder="Trade identifier"
+                  required 
+                />
+              </div>
+              <div>
+                <label>Settlement Window (seconds)</label>
+                <input 
+                  name="settlementWindow" 
+                  type="number" 
+                  className="input-field" 
+                  placeholder="3600 (1 hour)"
+                  defaultValue="3600"
+                  required 
+                />
+              </div>
+              <button type="submit" className="btn-primary">Issue Clearance</button>
+            </form>
+          </div>
         </div>
       )}
     </div>

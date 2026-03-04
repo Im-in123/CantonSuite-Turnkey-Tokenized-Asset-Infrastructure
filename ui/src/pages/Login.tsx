@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import Signup from "./Signup"; 
+// import Signup from "./Signup"; 
 import CantonIAM from "../services/CantonIAM";
 
 interface LoginProps {
@@ -83,7 +83,7 @@ export default function Login({ onLogin }: LoginProps) {
   };
 
   if (view === "signup") {
-    return <Signup onLogin={onLogin} onSwitchToLogin={() => setView("login")} />;
+    // return <Signup onLogin={onLogin} onSwitchToLogin={() => setView("login")} />;
   }
 
   return (

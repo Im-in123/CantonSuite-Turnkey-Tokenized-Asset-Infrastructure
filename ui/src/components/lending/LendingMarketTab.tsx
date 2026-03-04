@@ -1,5 +1,5 @@
 import React from "react";
-import { LendingPool } from "@daml.js/CantonSuite-0.0.1/lib/Lending";
+import { LendingPool } from "@daml.js/CantonSuite-0.1.0/lib/Lending/Pool";
 
 interface LendingMarketTabProps {
   pools: readonly any[];

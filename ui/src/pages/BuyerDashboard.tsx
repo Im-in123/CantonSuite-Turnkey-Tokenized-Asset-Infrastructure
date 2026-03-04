@@ -1,11 +1,20 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useLedger, useParty, useStreamQueries } from "@daml/react";
-import { Asset } from "@daml.js/CantonSuite-0.0.1/lib/Assets";
-import { KYC } from "@daml.js/CantonSuite-0.0.1/lib/KYC";
-import { Allocation } from "@daml.js/CantonSuite-0.0.1/lib/Portfolio";
-import { RedemptionRequest } from "@daml.js/CantonSuite-0.0.1/lib/Redemption";
-import { Dividend } from "@daml.js/CantonSuite-0.0.1/lib/Distribution";
-import * as Trade from "@daml.js/CantonSuite-0.0.1/lib/Trade";
+import { RWAInstrument } from "@daml.js/CantonSuite-0.1.0/lib/Finance/Instruments";
+import { KYC } from "@daml.js/CantonSuite-0.1.0/lib/KYC";
+import { RedemptionRequest } from "@daml.js/CantonSuite-0.1.0/lib/Redemption/Atomic";
+import { Allocation } from "@daml.js/CantonSuite-0.1.0/lib/TokenStandard/Interfaces";
+import { DividendClaim } from "@daml.js/CantonSuite-0.1.0/lib/Distribution/ClaimBased";
+import * as Trade from "@daml.js/CantonSuite-0.1.0/lib/Trade";
+import { 
+  LenderShare,
+  DepositRequest,
+  WithdrawalRequest
+} from "@daml.js/CantonSuite-0.1.0/lib/Lending/Deposits";
+import { LoanRequest, Loan } from "@daml.js/CantonSuite-0.1.0/lib/Lending/Loans";
+import { LendingPool as LendingPoolPool } from "@daml.js/CantonSuite-0.1.0/lib/Lending/Pool";
+import { MiningRoundReference } from "@daml.js/CantonSuite-0.1.0/lib/CantonCoin/MiningRoundSync";
+import { SynchronizerMigrationRequest, MigrationWorkflow } from "@daml.js/CantonSuite-0.1.0/lib/Network/SynchronizerMigration";
 import Modal from "../components/Modal"; 
 import { useToast } from "../context/ToastContext";
 import { useStreamNotification } from "../hooks/useStreamNotification";
@@ -16,6 +25,9 @@ import BuyerStats from "../components/buyer/BuyerStats";
 import BuyerMarketplace from "../components/buyer/BuyerMarketplace";
 import BuyerPortfolio from "../components/buyer/BuyerPortfolio";
 import BuyerYields from "../components/buyer/BuyerYields";
+// Lending components for buyer
+import LendingMarketTab from "../components/lending/LendingMarketTab";
+import LendingPositionsTab from "../components/lending/LendingPositionsTab";
 
 export default function BuyerDashboard() {
   const ledger = useLedger();
@@ -23,7 +35,7 @@ export default function BuyerDashboard() {
   const toast = useToast();
   const iam = CantonIAM.getInstance();
 
-  const [activeTab, setActiveTab] = useState<"marketplace" | "portfolio" | "yields">("marketplace");
+  const [activeTab, setActiveTab] = useState<"marketplace" | "portfolio" | "lending" | "yields">("marketplace");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Safely handle missing templates during initial load
@@ -36,10 +48,23 @@ export default function BuyerDashboard() {
 
   // --- QUERY HOOKS ---
   const { contracts: kycContracts, loading: kycLoading } = useStreamQueries(KYC);
-  const { contracts: assets } = useStreamQueries(Asset);
+  const { contracts: assets } = useStreamQueries(RWAInstrument);
   const { contracts: allocations } = useStreamQueries(Allocation);
   const { contracts: redemptionRequests } = useStreamQueries(RedemptionRequest, () => [{ buyer: party }]);
   const { contracts: dividends, loading: divLoading } = useStreamQueries(Dividend, () => [{ owner: party }]);
+  
+  // --- LENDING QUERY HOOKS ---
+  const { contracts: pools } = useStreamQueries(LendingPoolPool);
+  const { contracts: myShares } = useStreamQueries(LenderShare, () => [{ lender: party }]);
+  const { contracts: myLoans } = useStreamQueries(Loan, () => [{ borrower: party }]);
+  const { contracts: myDepositRequests } = useStreamQueries(DepositRequest, () => [{ lender: party }]);
+  const { contracts: myWithdrawalRequests } = useStreamQueries(WithdrawalRequest, () => [{ lender: party }]);
+  const { contracts: myLoanRequests } = useStreamQueries(LoanRequest, () => [{ borrower: party }]);
+  
+  // --- SYNC QUERY HOOKS ---
+  const { contracts: miningRounds } = useStreamQueries(MiningRoundReference);
+  const { contracts: migrationRequests } = useStreamQueries(SynchronizerMigrationRequest, () => [{ requester: party }]);
+  const { contracts: migrationWorkflows } = useStreamQueries(MigrationWorkflow, () => [{ requester: party }]);
   
   const { contracts: proposed } = useStreamQueries(ProposedTemplate, () => [{ buyer: party }]);
   const { contracts: agreed } = useStreamQueries(Trade.TradeAgreement, () => [{ buyer: party }]);
@@ -66,7 +91,12 @@ export default function BuyerDashboard() {
 
   const realApproved = Trade.ApprovedTrade ? approved : [];
 
-  const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
+  const [selectedAsset, setSelectedAsset] = useState<RWAInstrument | null>(null);
+  
+  // --- SYNC STATE ---
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [syncIssue, setSyncIssue] = useState<string>("");
+  const [pendingMigration, setPendingMigration] = useState<any>(null);
   
   // FIXED: Use string state for inputs to prevent NaN and backspace issues
   const [buyQty, setBuyQty] = useState<string>(""); 
@@ -116,6 +146,75 @@ export default function BuyerDashboard() {
     }
   };
 
+  const handleCancelDeposit = async (cid: string) => {
+    try { 
+      await ledger.exercise(DepositRequest.CancelDepositRequest, cid as any, {}); 
+      toast.showToast("Deposit Cancelled", "info"); 
+    }
+    catch(e:any) { toast.showToast(e.message, "error"); }
+  };
+
+  const handleCancelWithdrawal = async (cid: string) => {
+    try { 
+      await ledger.exercise(WithdrawalRequest.CancelWithdrawalRequest, cid as any, {}); 
+      toast.showToast("Withdrawal Cancelled", "info"); 
+    }
+    catch(e:any) { toast.showToast(e.message, "error"); }
+  };
+
+  // --- SYNC HELPER FUNCTIONS ---
+  
+  const checkMiningRoundStatus = () => {
+    if (miningRounds.length === 0) return { status: "no-round", message: "No active mining round" };
+    
+    const currentRound = miningRounds[0];
+    const now = new Date();
+    const expiresAt = new Date(currentRound.payload.expiresAt);
+    const remainingSeconds = Math.floor((expiresAt.getTime() - now.getTime()) / 1000);
+    
+    if (remainingSeconds <= 0) {
+      return { status: "expired", message: "Mining round expired" };
+    } else if (remainingSeconds < 300) { // Less than 5 minutes
+      return { 
+        status: "warning", 
+        message: `Only ${Math.floor(remainingSeconds / 60)} minutes left in mining round`,
+        remainingSeconds 
+      };
+    } else {
+      return { 
+        status: "good", 
+        message: `${Math.floor(remainingSeconds / 60)} minutes remaining in mining round`,
+        remainingSeconds 
+      };
+    }
+  };
+  
+  const handleSyncIssue = (issue: string) => {
+    setSyncIssue(issue);
+    setShowSyncModal(true);
+  };
+  
+  const initiateMigration = async (targetSync: string) => {
+    if (!selectedAsset) return;
+    
+    try {
+      await ledger.create(SynchronizerMigrationRequest, {
+        requester: party,
+        issuer: selectedAsset.payload.tokenIssuer,
+        holdingCid: selectedAsset.contractId as any,
+        currentSync: "sandbox",
+        targetSync: targetSync,
+        reason: "Trading synchronization",
+        requestedAt: new Date().toISOString(),
+        deadline: new Date(Date.now() + 86400000).toISOString()
+      });
+      toast.showToast(`Migration to ${targetSync} requested`, "success");
+      setShowSyncModal(false);
+    } catch (e: any) {
+      toast.showToast(e.message, "error");
+    }
+  };
+
   const submitTrade = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedAsset || isSubmitting) return;
@@ -130,7 +229,18 @@ export default function BuyerDashboard() {
 
     setIsSubmitting(true);
     
-    const assetContract = assets.find(a => a.payload.assetId === selectedAsset.assetId);
+    // --- CHECK MINING ROUND STATUS ---
+    const miningStatus = checkMiningRoundStatus();
+    if (miningStatus.status === "expired") {
+      toast.showToast("Mining round expired. Please wait for next round.", "error");
+      setIsSubmitting(false);
+      return;
+    }
+    if (miningStatus.status === "warning") {
+      toast.showToast(miningStatus.message, "warning");
+    }
+    
+    const assetContract = assets.find(a => a.payload.instrument._2 === selectedAsset.payload.instrument._2);
     if (!assetContract) { setIsSubmitting(false); return; }
 
     const regulatorParty = getParty("Regulator");
@@ -143,14 +253,14 @@ export default function BuyerDashboard() {
     try {
       await ledger.create(Trade.ProposedTrade, {
         buyer: party,
-        seller: selectedAsset.issuer,
-        assetIssuer: selectedAsset.issuer,
-        assetId: selectedAsset.assetId,
+        seller: selectedAsset.payload.tokenIssuer,
+        assetIssuer: selectedAsset.payload.tokenIssuer,
+        assetId: selectedAsset.payload.instrument._2,
         assetCid: assetContract.contractId,
         quantity: quantityNum.toFixed(2),  
-        pricePerUnit: selectedAsset.pricePerUnit,
+        pricePerUnit: selectedAsset.payload.pricePerUnit,
         isPrimary: true,
-        complianceParty: selectedAsset.compliance,
+        complianceParty: selectedAsset.payload.tokenIssuer,
         regulatorParty: regulatorParty,
         createdAt: new Date().toISOString()
       });
@@ -222,13 +332,58 @@ export default function BuyerDashboard() {
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '2rem', borderBottom: '2px solid var(--border)' }}>
         <button onClick={() => setActiveTab("marketplace")} style={{ padding: '1rem 2rem', background: activeTab === "marketplace" ? 'var(--primary)' : 'transparent', color: activeTab === "marketplace" ? 'white' : 'var(--text)', border: 'none', borderBottom: activeTab === "marketplace" ? '3px solid var(--primary)' : 'none', cursor: 'pointer', fontWeight: activeTab === "marketplace" ? 'bold' : 'normal', transition: 'all 0.2s' }}>Marketplace</button>
         <button onClick={() => setActiveTab("portfolio")} style={{ padding: '1rem 2rem', background: activeTab === "portfolio" ? 'var(--primary)' : 'transparent', color: activeTab === "portfolio" ? 'white' : 'var(--text)', border: 'none', borderBottom: activeTab === "portfolio" ? '3px solid var(--primary)' : 'none', cursor: 'pointer', fontWeight: activeTab === "portfolio" ? 'bold' : 'normal', transition: 'all 0.2s' }}>Portfolio & Redemptions</button>
+        <button onClick={() => setActiveTab("lending")} style={{ padding: '1rem 2rem', background: activeTab === "lending" ? 'var(--primary)' : 'transparent', color: activeTab === "lending" ? 'white' : 'var(--text)', border: 'none', borderBottom: activeTab === "lending" ? '3px solid var(--primary)' : 'none', cursor: 'pointer', fontWeight: activeTab === "lending" ? 'bold' : 'normal', transition: 'all 0.2s' }}>DeFi Lending {myShares.length > 0 && <span className="badge badge-blue" style={{marginLeft: '0.5rem'}}>{myShares.length}</span>}</button>
         <button onClick={() => setActiveTab("yields")} style={{ padding: '1rem 2rem', background: activeTab === "yields" ? 'var(--primary)' : 'transparent', color: activeTab === "yields" ? 'white' : 'var(--text)', border: 'none', borderBottom: activeTab === "yields" ? '3px solid var(--primary)' : 'none', cursor: 'pointer', fontWeight: activeTab === "yields" ? 'bold' : 'normal', transition: 'all 0.2s' }}>Yield & Dividends {dividends.length > 0 && <span className="badge badge-green" style={{marginLeft: '0.5rem'}}>{dividends.length}</span>}</button>
       </div>
 
       <BuyerStats isApproved={isApproved} isPending={isPending} isRejected={isRejected} isSubmitting={isSubmitting} portfolioValue={portfolioValue} totalUnclaimedYield={totalUnclaimedYield} activeOrdersCount={allActiveTrades.length} onStartKYC={handleStartKYC} />
 
-      {activeTab === "marketplace" && <BuyerMarketplace assets={assets} activeTrades={allActiveTrades} isApproved={isApproved} isPending={isPending} onSelectAsset={(asset) => setSelectedAsset(asset)} />}
+      {activeTab === "marketplace" && (
+        <div>
+          {/* Mining Round Status Indicator */}
+          <div className="card" style={{marginBottom: '1rem'}}>
+            <div className="flex-between">
+              <span>⏱️ Mining Round Status</span>
+              <div className={`badge ${checkMiningRoundStatus().status === 'good' ? 'badge-success' : checkMiningRoundStatus().status === 'warning' ? 'badge-yellow' : 'badge-red'}`}>
+                {checkMiningRoundStatus().message}
+              </div>
+            </div>
+          </div>
+          
+          <BuyerMarketplace 
+            assets={assets} 
+            activeTrades={allActiveTrades} 
+            isApproved={isApproved} 
+            isPending={isPending} 
+            onSelectAsset={(asset) => setSelectedAsset(asset)} 
+          />
+        </div>
+      )}
       {activeTab === "portfolio" && <BuyerPortfolio allocations={allocations} assets={assets} redemptionRequests={redemptionRequests} onRedeem={(alloc) => { setRedemptionForm({ allocation: alloc, quantity: "", reason: "" }); setIsRedemptionModalOpen(true); }} />}
+      {activeTab === "lending" && (
+        <div className="flex-column" style={{ gap: '2rem' }}>
+          <LendingMarketTab 
+            pools={pools} 
+            isIssuer={false} 
+            isParticipant={true} 
+            onDeposit={(pool) => { /* Handle deposit */ }}
+            onBorrow={(pool) => { /* Handle borrow */ }}
+          />
+          <LendingPositionsTab 
+            myShares={myShares} 
+            myLoans={myLoans} 
+            myDepositRequests={myDepositRequests} 
+            myWithdrawalRequests={myWithdrawalRequests} 
+            myRequests={myLoanRequests} 
+            pools={pools}
+            onWithdraw={(share) => { /* Handle withdrawal */ }}
+            onCancelDeposit={handleCancelDeposit}
+            onCancelWithdrawal={handleCancelWithdrawal}
+            onRepay={(loan) => { /* Handle repayment */ }}
+            onExtend={(loan) => { /* Handle extension */ }}
+          />
+        </div>
+      )}
       {activeTab === "yields" && <BuyerYields dividends={dividends} allocations={allocations} totalUnclaimedYield={totalUnclaimedYield} claimingIds={claimingIds} onClaim={handleClaimDividend} />}
 
       <Modal isOpen={!!selectedAsset} onClose={() => !isSubmitting && setSelectedAsset(null)} title="Place Order">
@@ -285,6 +440,50 @@ export default function BuyerDashboard() {
           <div><label style={{ display: 'block', marginBottom: '0.5rem' }}>Reason for Redemption</label><textarea className="input-field" style={{ width: '100%', padding: '0.8rem', minHeight: '80px' }} value={redemptionForm.reason} onChange={e => setRedemptionForm({ ...redemptionForm, reason: e.target.value })} placeholder="e.g., Liquidity needs, portfolio rebalancing..." required disabled={isSubmitting} /></div>
           <button type="submit" className="btn-primary" style={{ width: '100%' }} disabled={isSubmitting}>{isSubmitting ? "Submitting..." : "Submit Redemption Request"}</button>
         </form>
+      </Modal>
+
+      {/* SYNC ISSUES MODAL */}
+      <Modal isOpen={showSyncModal} onClose={() => setShowSyncModal(false)} title="Synchronization Required">
+        <div className="flex-column" style={{gap: '1.5rem'}}>
+          <div className="card" style={{background: 'var(--bg-warning)', border: '1px solid var(--warning)'}}>
+            <h4>⚠️ Synchronization Issue</h4>
+            <p>{syncIssue}</p>
+          </div>
+          
+          <div>
+            <h5>Mining Round Status</h5>
+            <div className={`badge ${checkMiningRoundStatus().status === 'good' ? 'badge-success' : checkMiningRoundStatus().status === 'warning' ? 'badge-yellow' : 'badge-red'}`}>
+              {checkMiningRoundStatus().message}
+            </div>
+          </div>
+          
+          <div>
+            <h5>Available Actions</h5>
+            <div className="flex-column" style={{gap: '0.5rem'}}>
+              <button className="btn-outline" onClick={() => initiateMigration('global')}>
+                Migrate to Global Sync
+              </button>
+              <button className="btn-outline" onClick={() => initiateMigration('institutional-sync')}>
+                Migrate to Institutional Sync
+              </button>
+              <button className="btn-secondary" onClick={() => setShowSyncModal(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+          
+          {migrationRequests.length > 0 && (
+            <div>
+              <h5>Pending Migration Requests</h5>
+              {migrationRequests.map(req => (
+                <div key={req.contractId} className="flex-between" style={{padding: '0.5rem', background: 'var(--bg-dark)', borderRadius: '4px'}}>
+                  <span>To {req.payload.targetSync}</span>
+                  <span className="badge badge-yellow">Pending</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </Modal>
     </div>
   );

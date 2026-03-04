@@ -1,7 +1,6 @@
-import React from "react";
-import { RedemptionRequest } from "@daml.js/CantonSuite-0.0.1/lib/Redemption";
+import { RedemptionRequest } from "@daml.js/CantonSuite-0.1.0/lib/Redemption/Atomic";
 import { useLedger } from "@daml/react";
-import { ContractId } from "@daml/types"; // <--- Import this
+import { ContractId } from "@daml/types";
 import { useToast } from "../../context/ToastContext";
 
 interface BuyerPortfolioProps {

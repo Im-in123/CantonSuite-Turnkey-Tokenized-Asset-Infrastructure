@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { Asset } from "@daml.js/CantonSuite-0.0.1/lib/Assets";
+import { RWAInstrument } from "@daml.js/CantonSuite-0.1.0/lib/Finance/Instruments";
 
 interface IssuerAssetTabProps {
   assets: readonly any[];
@@ -9,7 +9,7 @@ interface IssuerAssetTabProps {
   pendingSettlements: readonly any[];
   processingIds: Set<string>;  
   onCreateOpen: () => void;
-  onManage: (asset: Asset, cid: string) => void;
+  onManage: (asset: RWAInstrument, cid: string) => void;
   onToggleFraction: (cid: string) => void;
   onAcceptTrade: (cid: string) => void;
   onFinalizeTrade: (cid: string) => void;
