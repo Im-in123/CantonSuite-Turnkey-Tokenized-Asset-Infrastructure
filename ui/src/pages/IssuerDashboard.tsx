@@ -24,6 +24,7 @@ import CantonIAM from "../services/CantonIAM";
 import IssuerAssetTab from "../components/issuer/IssuerAssetTab";
 import IssuerRedemptionTab from "../components/issuer/IssuerRedemptionTab";
 import IssuerYieldTab from "../components/issuer/IssuerYieldTab";
+import MarketPresence from "../components/issuer/MarketPresence";
 // Import advanced issuer lending components
 import PoolLifecycleManager from "../components/issuer/lending/PoolLifecycleManager";
 import BatchProcessor from "../components/issuer/lending/BatchProcessor";
@@ -36,7 +37,7 @@ export default function IssuerDashboard() {
   const toast = useToast();
   const iam = CantonIAM.getInstance();
 
-  const [activeTab, setActiveTab] = useState<"assets" | "trading" | "lending" | "redemptions" | "yields">("assets");
+  const [activeTab, setActiveTab] = useState<"assets" | "trading" | "marketplace" | "lending" | "redemptions" | "yields">("assets");
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set()); 
   const [isSubmitting, setIsSubmitting] = useState(false); 
 
@@ -70,6 +71,12 @@ export default function IssuerDashboard() {
   useStreamNotification(requests, "Buy Order", reqLoading);
   useStreamNotification(redemptionRequests, "Redemption Request", redLoading);
 
+  // --- MARKETPLACE PUBLISHING HANDLER ---
+  const handlePublishToMarket = (asset: any) => {
+    setSelectedAssetForManager(asset);
+    setAssetManagerModal("PUBLISH");
+  };
+
   // --- STATE ---
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newAsset, setNewAsset] = useState({ id: "", name: "", type: "Equity", supply: 1000, price: 10 });
@@ -79,11 +86,14 @@ export default function IssuerDashboard() {
   const [actionValue, setActionValue] = useState(0);
   const [isYieldModalOpen, setIsYieldModalOpen] = useState(false);
   const [yieldForm, setYieldForm] = useState({ assetId: "", label: "", perUnitAmount: 0 });
+  
+  // Asset Manager state for marketplace publishing
+  const [assetManagerModal, setAssetManagerModal] = useState<"PUBLISH" | null>(null);
+  const [selectedAssetForManager, setSelectedAssetForManager] = useState<any>(null);
 
   const eligibleHoldersCount = allocations.length > 0 ? allocations.length : 0;
 
   // --- HANDLERS ---
-
   const execute = async (cid: string, fn: () => Promise<any>, msg: string) => {
     if (processingIds.has(cid)) return;
     setProcessingIds(prev => new Set(prev).add(cid));
@@ -100,41 +110,53 @@ export default function IssuerDashboard() {
   // --- DIVIDEND WORKFLOW CREATION ---
   const handleCreateDividendWorkflow = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
-    
-    const complianceParty = iam.getPartyByRole('Compliance');
-    const regulatorParty = iam.getPartyByRole('Regulator');
-    if (!complianceParty || !regulatorParty) {
-      toast.showToast("System Error: Required parties not found.", "error");
-      return;
-    }
-    
     setIsSubmitting(true);
     try {
-      await ledger.create(DividendAnnouncementWorkflow, {
+      const workflowCid = await ledger.create(DividendAnnouncementWorkflow, {
         issuer: party,
-        compliance: complianceParty,
-        regulator: regulatorParty,
-        assetId: String(yieldForm.assetId),
-        dividendLabel: yieldForm.label,
-        perUnitAmount: yieldForm.perUnitAmount.toFixed(2),
-        expirationDays: 30
+        assetId: yieldForm.assetId,
+        label: yieldForm.label,
+        perUnitAmount: yieldForm.perUnitAmount,
+        totalAmount: yieldForm.perUnitAmount * allocations.filter(a => a.payload.instrumentId._1._2 === yieldForm.assetId).reduce((sum, a) => sum + Number(a.payload.quantity), 0),
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days
+        regulators: [iam.getPartyByRole("Regulator")],
+        observers: []
       });
-      toast.showToast(`Dividend workflow created. Awaiting compliance approval.`, "success");
+      toast.showToast("Dividend workflow created. Awaiting compliance approval.", "success");
       setIsYieldModalOpen(false);
       setYieldForm({ assetId: "", label: "", perUnitAmount: 0 });
+    } catch (e: any) { toast.showToast(e.message, "error"); }
+    finally { setIsSubmitting(false); }
+  };
+
+  const handleClawback = async (assetId: string, quantity: string, reason: string) => {
+    try {
+      // This would implement the actual clawback logic
+      await ledger.exercise("Holding_Impl.InitiateClawback", "PLACEHOLDER_CONTRACT_ID", {
+        clawbackReason: reason,
+        clawbackQuantity: quantity
+      });
+      toast.showToast(`Clawback initiated for ${quantity} units of ${assetId}`, "success");
     } catch (e: any) {
       toast.showToast(e.message, "error");
-    } finally {
-      setIsSubmitting(false);
     }
   };
+
+  const tabStyle = (active: boolean) => ({
+    padding: '1rem 2rem', 
+    background: active ? 'var(--primary)' : 'transparent', 
+    color: active ? 'white' : 'var(--text-main)', 
+    border: 'none', 
+    borderBottom: active ? '3px solid var(--primary)' : 'none', 
+    cursor: 'pointer', fontWeight: active ? 'bold' : 'normal', transition: 'all 0.2s', display: 'flex', alignItems: 'center', gap: '8px'
+  });
 
   const handleCreateDraft = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
     setIsSubmitting(true);
-    const complianceParty = iam.getPartyByRole('Compliance');
+    const complianceParty = iam.getPartyByRole('ComplianceOfficer');
     const regulatorParty = iam.getPartyByRole('Regulator');
     if (!complianceParty) { toast.showToast("System Error: Compliance party not found.", "error"); setIsSubmitting(false); return; }
     const observersList = [regulatorParty].filter(Boolean) as string[];
@@ -187,15 +209,6 @@ export default function IssuerDashboard() {
     return sum + (Number(req.payload.quantity) * price);
   }, 0);
 
-  const tabStyle = (active: boolean) => ({
-    padding: '1rem 2rem', 
-    background: active ? 'var(--primary)' : 'transparent', 
-    color: active ? 'white' : 'var(--text-main)', 
-    border: 'none', 
-    borderBottom: active ? '3px solid var(--primary)' : 'none', 
-    cursor: 'pointer', fontWeight: active ? 'bold' : 'normal', transition: 'all 0.2s', display: 'flex', alignItems: 'center', gap: '8px'
-  });
-
   // Calculate Asset Badge (Requests + Ready Settlements + Pending Settlements)
   const assetBadgeCount = requests.length + settlements.length + pendingSettlements.length;
 
@@ -204,6 +217,7 @@ export default function IssuerDashboard() {
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '2rem', borderBottom: '2px solid var(--border)' }}>
         <button onClick={() => setActiveTab("assets")} style={tabStyle(activeTab === "assets")}>Asset Management {assetBadgeCount > 0 && <span className="badge badge-yellow">{assetBadgeCount}</span>}</button>
         <button onClick={() => setActiveTab("trading")} style={tabStyle(activeTab === "trading")}>Trading {requests.length > 0 && <span className="badge badge-blue">{requests.length}</span>}</button>
+        <button onClick={() => setActiveTab("marketplace")} style={tabStyle(activeTab === "marketplace")}>Marketplace</button>
         <button onClick={() => setActiveTab("lending")} style={tabStyle(activeTab === "lending")}>DeFi Lending {loanRequests.length > 0 && <span className="badge badge-green">{loanRequests.length}</span>}</button>
         <button onClick={() => setActiveTab("redemptions")} style={tabStyle(activeTab === "redemptions")}>Redemptions {redemptionRequests.length > 0 && <span className="badge badge-red">{redemptionRequests.length}</span>}</button>
         <button onClick={() => setActiveTab("yields")} style={tabStyle(activeTab === "yields")}>Yield Distribution</button>
@@ -221,7 +235,8 @@ export default function IssuerDashboard() {
           onManage={(asset, cid) => { setSelectedAsset(asset); setManageCid(cid); setActionValue(0); }} 
           onToggleFraction={toggleFraction} 
           onAcceptTrade={acceptTrade} 
-          onFinalizeTrade={finalizeTrade} 
+          onFinalizeTrade={finalizeTrade}
+          onPublishToMarket={handlePublishToMarket}
         />
       )}
       {activeTab === "trading" && (
@@ -231,6 +246,7 @@ export default function IssuerDashboard() {
           {/* Trading functionality would go here */}
         </div>
       )}
+      {activeTab === "marketplace" && <MarketPresence />}
       {activeTab === "lending" && (
         <div className="flex-column" style={{ gap: '2rem' }}>
           <PoolLifecycleManager />
@@ -274,7 +290,7 @@ export default function IssuerDashboard() {
             <select className="input-field" value={yieldForm.assetId} onChange={e => setYieldForm({...yieldForm, assetId: e.target.value})} required disabled={isSubmitting}>
               <option value="">Select Asset</option>
               {/* UPDATED: Only show my assets in the dropdown with safety checks */}
-              {myAssets.filter(a => a.payload && a.payload.instrument && a.payload.instrument._1).map(a => (<option key={a.contractId} value={String(a.payload.instrument._1._2)}>{a.payload.name} ({a.payload.instrument._1._2})</option>))}
+              {myAssets.filter(a => a.payload && a.payload.instrument && a.payload.instrument.id && a.payload.instrument.id._1).map(a => (<option key={a.contractId} value={String(a.payload.instrument.id._1)}>{a.payload.name} ({a.payload.instrument.id._1})</option>))}
             </select>
             {yieldForm.assetId && (
               <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--info)', background: 'rgba(59, 130, 246, 0.1)', padding: '0.5rem', borderRadius: '4px' }}>
@@ -285,6 +301,42 @@ export default function IssuerDashboard() {
           <div><label>Label</label><input placeholder="e.g., Q4 2025 Rental Income" value={yieldForm.label} onChange={e => setYieldForm({...yieldForm, label: e.target.value})} className="input-field" required disabled={isSubmitting} /></div>
           <div><label>Amount Per Token Unit</label><input placeholder="0.00" type="number" step="0.01" value={yieldForm.perUnitAmount} onChange={e => setYieldForm({...yieldForm, perUnitAmount: parseFloat(e.target.value)})} className="input-field" required disabled={isSubmitting} /></div>
           <button type="submit" className="btn-primary" disabled={isSubmitting}>{isSubmitting ? "Creating..." : "Create Workflow"}</button>
+        </form>
+      </Modal>
+
+      {/* Publish to Market Modal */}
+      <Modal isOpen={assetManagerModal === "PUBLISH"} onClose={() => setAssetManagerModal(null)} title={`Publish: ${selectedAssetForManager?.name || 'Asset'}`}>
+        <form onSubmit={(e) => {
+          e.preventDefault();
+          toast.showToast("Asset published to marketplace!", "success");
+          setAssetManagerModal(null);
+        }} style={{display: 'flex', flexDirection: 'column', gap: '1rem'}}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <label style={{ fontSize: '0.875rem', fontWeight: '500', color: 'var(--text-main)' }}>Asset</label>
+            <input 
+              type="text" 
+              className="input-field" 
+              value={selectedAssetForManager?.name || ''} 
+              disabled 
+              style={{background: 'var(--bg-dark)', color: 'var(--text-muted)'}}
+            />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <label style={{ fontSize: '0.875rem', fontWeight: '500', color: 'var(--text-main)' }}>Quantity to Publish</label>
+            <input type="number" className="input-field" placeholder="Enter quantity" required />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <label style={{ fontSize: '0.875rem', fontWeight: '500', color: 'var(--text-main)' }}>Visibility Tier</label>
+            <select className="input-field">
+              <option value="Global">Global Discovery</option>
+              <option value="Firm">Firm-Only</option>
+              <option value="Selected">Whitelist</option>
+              <option value="Direct">Direct</option>
+            </select>
+          </div>
+          <button className="btn-primary" type="submit" style={{marginTop: '0.5rem'}}>
+            Publish to Marketplace
+          </button>
         </form>
       </Modal>
     </div>

@@ -8,6 +8,7 @@ interface LoginProps {
 
 const DEFAULT_ROLES = [
   { name: "PlatformIssuer", color: "#3b82f6", desc: "System Administrator" },
+  { name: "Admin", color: "#dc2626", desc: "Super Administrator" },
   { name: "ComplianceOfficer", color: "#8b5cf6", desc: "Internal Control" },
   { name: "Regulator", color: "#f59e0b", desc: "Audit & Oversight" },
   { name: "Alice", color: "#10b981", desc: "Buyer (Wealthy)" },

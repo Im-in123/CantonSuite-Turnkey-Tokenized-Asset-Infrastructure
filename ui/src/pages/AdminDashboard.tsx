@@ -209,15 +209,39 @@ export default function AdminDashboard() {
 
       {activeTab === "system" && (
         <div className="card">
-          <h3>System Information</h3>
+          <h3>System Administration</h3>
+          
+          {/* Emergency Controls */}
+          <div style={{ marginBottom: '2rem' }}>
+            <h4 style={{ color: 'var(--danger)', marginBottom: '1rem' }}>🚨 Emergency Controls</h4>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+              <button className="btn-danger" style={{ opacity: 0.7 }} disabled>
+                ⏸️ Pause All Trading
+              </button>
+              <button className="btn-danger" style={{ opacity: 0.7 }} disabled>
+                🔄 Emergency Rollback
+              </button>
+              <button className="btn-warning" style={{ opacity: 0.7 }} disabled>
+                🧊 Freeze All Assets
+              </button>
+              <button className="btn-warning" style={{ opacity: 0.7 }} disabled>
+                📢 System Broadcast
+              </button>
+            </div>
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
+              ⚠️ Emergency controls require additional system permissions
+            </p>
+          </div>
+
+          {/* System Configuration */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
             <div>
               <h4>🔧 System Configuration</h4>
               <ul style={{ listStyle: 'none', padding: 0 }}>
                 <li><strong>Ledger ID:</strong> sandbox</li>
                 <li><strong>Application ID:</strong> CantonSuite_App</li>
-                <li><strong>Admin Access:</strong> Enabled</li>
-                <li><strong>Public Market:</strong> Active</li>
+                <li><strong>Admin Access:</strong> <span className="badge badge-green">Enabled</span></li>
+                <li><strong>Public Market:</strong> <span className="badge badge-green">Active</span></li>
               </ul>
             </div>
             <div>
@@ -228,6 +252,22 @@ export default function AdminDashboard() {
                 <li><strong>System Status:</strong> <span className="badge badge-green">Healthy</span></li>
                 <li><strong>Last Sync:</strong> Just now</li>
               </ul>
+            </div>
+          </div>
+
+          {/* Admin Actions */}
+          <div style={{ marginTop: '2rem', paddingTop: '2rem', borderTop: '1px solid var(--border)' }}>
+            <h4>🛡️ Administrative Actions</h4>
+            <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
+              <button className="btn-outline">
+                📋 Export System Logs
+              </button>
+              <button className="btn-outline">
+                🔄 Refresh Cache
+              </button>
+              <button className="btn-outline">
+                📊 Generate Report
+              </button>
             </div>
           </div>
         </div>

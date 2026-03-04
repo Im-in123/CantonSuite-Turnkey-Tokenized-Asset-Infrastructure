@@ -212,8 +212,10 @@ export default function ComplianceDashboard() {
                             const publicParty = iam.getPartyByRole("Public");
                             const observers = publicParty ? [publicParty] : [];
                             
-                            return ledger.exercise(DraftAsset.FinalizeIssuance, d.contractId, { 
-                                additionalObservers: observers 
+                            return ledger.exercise(DraftRWAInstrument.FinalizeIssuance, d.contractId, { 
+                                additionalObservers: observers,
+                                description: d.payload.name || "Asset finalized via compliance",
+                                validAsOf: new Date().toISOString()
                             });
                         }, "Asset Finalized & Listed")}
                       >

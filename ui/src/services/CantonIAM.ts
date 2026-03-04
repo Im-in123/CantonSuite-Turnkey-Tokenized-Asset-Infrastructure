@@ -100,7 +100,7 @@ class CantonIAM {
     
     // Map known roles to their full party IDs - Updated to match startup script
     const knownRoles = [
-      'PlatformIssuer', 'ComplianceOfficer', 'Regulator', 'Alice', 'Bob', 
+      'PlatformIssuer', 'Admin', 'ComplianceOfficer', 'Regulator', 'Alice', 'Bob', 
       'Charlie', 'LendingBank', 'Discovery_Service', 'AmuletApp', 'PublicMarket'
     ];
     

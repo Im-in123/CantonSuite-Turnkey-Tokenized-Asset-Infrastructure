@@ -13,14 +13,18 @@ export default function AssetModals({ modalType, setModalType, selectedAsset, as
   return (
     <>
       {/* 4-TIER PUBLISH MODAL */}
-      <Modal isOpen={modalType === "PUBLISH"} onClose={onClose} title={`Distribute: ${selectedAsset?.payload.instrument.id.unpack}`}>
+      <Modal isOpen={modalType === "PUBLISH"} onClose={onClose} title={`Distribute: ${selectedAsset?.payload.name || 'Asset'}`}>
         <form onSubmit={(e) => {
           e.preventDefault();
           const publicMarketId = handlers.iam.getPartyByRole("PublicMarket");
+          const assetId = selectedAsset?.payload.instrument && selectedAsset.payload.instrument.id && selectedAsset.payload.instrument.id._1 
+            ? selectedAsset.payload.instrument.id._1 
+            : selectedAsset?.payload.name || 'unknown';
+          
           handlers.handlePublishToMarket({
             listingId: "LST-" + Date.now(),
             issuer: party,
-            assetId: selectedAsset.payload.instrument.id.unpack,
+            assetId: assetId,
             instrumentCid: selectedAsset.contractId,
             quantity: publishQty,
             pricePerUnit: selectedAsset.payload.pricePerUnit,
@@ -37,16 +41,66 @@ export default function AssetModals({ modalType, setModalType, selectedAsset, as
             observers: tier === "GlobalTier" ? [publicMarketId] : [] 
           });
         }} className="flex-column" style={{gap: '1.25rem'}}>
-          <select className="input-field" value={tier} onChange={e => setTier(e.target.value)}>
-            <option value="GlobalTier">Tier 1: Global Discovery</option>
-            <option value="FirmOnlyTier">Tier 2: Firm-Only</option>
-            <option value="SelectedTier">Tier 3: Whitelist</option>
-            <option value="DirectTier">Tier 4: Bilateral</option>
-          </select>
-          <input type="number" className="input-field" value={publishQty} onChange={e => setPublishQty(e.target.value)} placeholder="Quantity" required />
-          {tier === "FirmOnlyTier" && <input className="input-field" placeholder="Firm ID" value={firmId} onChange={e => setFirmId(e.target.value)} required />}
-          {(tier === "SelectedTier" || tier === "DirectTier") && <input className="input-field" placeholder="Target Party ID" value={targetParticipant} onChange={e => setTargetParticipant(e.target.value)} required />}
-          <button className="btn-primary" style={{background: 'var(--accent)'}} type="submit" disabled={loading}>Execute Listing</button>
+          <div className="form-group">
+            <label>Select Distribution Tier:</label>
+            <select className="input-field" value={tier} onChange={e => setTier(e.target.value)}>
+              <option value="GlobalTier">Tier 1: Global Discovery (Public)</option>
+              <option value="FirmOnlyTier">Tier 2: Firm-Only (Membership Gated)</option>
+              <option value="SelectedTier">Tier 3: Whitelist (Private Placement)</option>
+              <option value="DirectTier">Tier 4: Bilateral (Direct Offer)</option>
+            </select>
+          </div>
+          
+          <div className="form-group">
+            <label>Quantity to Distribute:</label>
+            <input type="number" className="input-field" value={publishQty} onChange={e => setPublishQty(e.target.value)} placeholder="Enter quantity" required />
+          </div>
+          
+          {tier === "FirmOnlyTier" && (
+            <div className="form-group">
+              <label>Firm ID:</label>
+              <input className="input-field" placeholder="Enter firm membership ID" value={firmId} onChange={e => setFirmId(e.target.value)} required />
+              <small className="text-muted">Only members of this firm can access the listing</small>
+            </div>
+          )}
+          
+          {(tier === "SelectedTier" || tier === "DirectTier") && (
+            <div className="form-group">
+              <label>{tier === "SelectedTier" ? "Target Investors" : "Direct Recipient"}:</label>
+              <input className="input-field" placeholder="Enter party ID" value={targetParticipant} onChange={e => setTargetParticipant(e.target.value)} required />
+              <small className="text-muted">
+                {tier === "SelectedTier" 
+                  ? "Comma-separated list of invited investor party IDs" 
+                  : "Single party ID for bilateral offer"}
+              </small>
+            </div>
+          )}
+          
+          <div className="tier-info" style={{ 
+            background: 'var(--bg-dark)', 
+            padding: '1rem', 
+            borderRadius: '8px', 
+            border: '1px solid var(--border)',
+            fontSize: '0.85rem'
+          }}>
+            <h4 style={{ margin: '0 0 0.5rem 0', color: 'var(--primary)' }}>Tier Information:</h4>
+            {tier === "GlobalTier" && (
+              <p style={{ margin: 0 }}>🌍 Public discovery - anyone can see and express interest</p>
+            )}
+            {tier === "FirmOnlyTier" && (
+              <p style={{ margin: 0 }}>🏢 Firm-gated - only verified firm members can purchase</p>
+            )}
+            {tier === "SelectedTier" && (
+              <p style={{ margin: 0 }}>✨ Private placement - only whitelisted investors can participate</p>
+            )}
+            {tier === "DirectTier" && (
+              <p style={{ margin: 0 }}>🎯 Bilateral offer - one-to-one subscription with specific party</p>
+            )}
+          </div>
+          
+          <button className="btn-primary" style={{background: 'var(--accent)'}} type="submit" disabled={loading}>
+            {loading ? "Creating..." : "Execute Listing"}
+          </button>
         </form>
       </Modal>
 
