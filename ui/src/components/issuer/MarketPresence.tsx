@@ -61,6 +61,12 @@ export default function MarketPresence() {
   const handleActivate = async (listing: MarketListing) => {
     const publicMarketId = iam.getPartyByRole("PublicMarket");
     try {
+      // Defensive check for template availability
+      if (!PrivacyPreservingListing || !PrivacyPreservingListing.PublishToGlobalDiscovery) {
+        toast.showToast("Marketplace templates not available", "error");
+        return;
+      }
+
       const tier = listing.payload.visibility.tier;
 
       if (tier === "GlobalTier") {
@@ -76,7 +82,7 @@ export default function MarketPresence() {
           firmId: listing.payload.visibility.firmMembership.value,
           observers: listing.payload.visibility.selectedInvestors
         });
-        toast.showToast("Firm-Only Listing is now LIVE.", "success");
+        toast.showToast("Firm Listing is now LIVE.", "success");
       } 
       else if (tier === "SelectedTier") {
         // Logic: Send invitations to whitelisted investors
@@ -85,44 +91,116 @@ export default function MarketPresence() {
             investor: investor
           });
         }
-        toast.showToast(`Invitations sent to ${listing.payload.visibility.selectedInvestors.length} investors.`, "success");
+        toast.showToast("Invitations sent to selected investors.", "success");
       }
       else if (tier === "DirectTier") {
         // Logic: Create bilateral subscription
         await ledger.exercise(PrivacyPreservingListing.CreateBilateralSubscription, listing.contractId);
         toast.showToast("Direct subscription request sent.", "success");
       }
-    } catch (e: any) { toast.showToast(e.message, "error"); }
+    } catch (e: any) { 
+      console.error("Activation error:", e);
+      toast.showToast(e.message || "Failed to activate listing", "error"); 
+    }
   };
 
   const handleAcceptIntent = async (intent: MarketListing) => {
     try {
+      // Defensive check for template availability
+      if (!PurchaseIntent || !PurchaseIntent.AcceptIntent) {
+        toast.showToast("Purchase intent template not available", "error");
+        return;
+      }
       // Logic: Accept buyer purchase intent and create settlement
       await ledger.exercise(PurchaseIntent.AcceptIntent, intent.contractId, {
         buyerPaymentCid: "PLACEHOLDER_PAYMENT_CID", // This would come from payment processing
         issuerAssetCid: "PLACEHOLDER_ASSET_CID"     // This would come from asset holdings
       });
       toast.showToast("Purchase intent accepted. Settlement initiated.", "success");
-    } catch (e: any) { toast.showToast(e.message, "error"); }
+    } catch (e: any) { 
+      console.error("Accept intent error:", e);
+      toast.showToast(e.message || "Failed to accept purchase intent", "error"); 
+    }
   };
 
   const handleRejectIntent = async (intent: MarketListing) => {
     try {
+      // Defensive check for template availability
+      if (!PurchaseIntent || !PurchaseIntent.RejectIntent) {
+        toast.showToast("Purchase intent template not available", "error");
+        return;
+      }
       await ledger.exercise(PurchaseIntent.RejectIntent, intent.contractId, {
         reason: "Insufficient availability or pricing mismatch"
       });
       toast.showToast("Purchase intent rejected.", "info");
-    } catch (e: any) { toast.showToast(e.message, "error"); }
+    } catch (e: any) { 
+      console.error("Reject intent error:", e);
+      toast.showToast(e.message || "Failed to reject purchase intent", "error"); 
+    }
   };
 
   const handleDirectSubscription = async (subscription: MarketListing) => {
     try {
+      // Defensive check for template availability
+      if (!SubscriptionRequest || !SubscriptionRequest.AcceptSubscription) {
+        toast.showToast("Subscription request template not available", "error");
+        return;
+      }
       await ledger.exercise(SubscriptionRequest.AcceptSubscription, subscription.contractId, {
         paymentHoldingCid: "PLACEHOLDER_PAYMENT_CID",
         issuerAssetCid: "PLACEHOLDER_ASSET_CID"
       });
       toast.showToast("Direct subscription accepted.", "success");
-    } catch (e: any) { toast.showToast(e.message, "error"); }
+    } catch (e: any) { 
+      console.error("Direct subscription error:", e);
+      toast.showToast(e.message || "Failed to accept direct subscription", "error"); 
+    }
+  };
+
+  const handleWithdrawListing = async (listing: MarketListing) => {
+    try {
+      // Check if the listing exists before trying to archive it
+      if (!listing || !listing.contractId) {
+        toast.showToast("Invalid listing data", "error");
+        return;
+      }
+      
+      // Handle different contract types differently
+      if (listing.type === "PENDING") {
+        // PrivacyPreservingListing - can be archived directly
+        await ledger.exercise(PrivacyPreservingListing.Archive, listing.contractId, {});
+      } else if (listing.type === "GLOBAL") {
+        // GlobalDiscoveryListing - can be archived directly
+        await ledger.exercise(GlobalDiscoveryListing.Archive, listing.contractId, {});
+      } else if (listing.type === "FIRM") {
+        // FirmMarketplaceListing - can be archived directly
+        await ledger.exercise(FirmMarketplaceListing.Archive, listing.contractId, {});
+      } else if (listing.type === "PRIVATE") {
+        // InvestorInvitation - can be archived directly
+        await ledger.exercise(InvestorInvitation.DeclineInvitation, listing.contractId, {});
+      } else if (listing.type === "DIRECT") {
+        // SubscriptionRequest - can be declined
+        await ledger.exercise(SubscriptionRequest.DeclineSubscription, listing.contractId, {});
+      } else if (listing.type === "CLUB") {
+        // ClubDeal - can be archived directly
+        await ledger.exercise(ClubDeal.Archive, listing.contractId, {});
+      } else {
+        // Fallback to direct archive for unknown types
+        await ledger.archive(listing.contractId);
+      }
+      
+      toast.showToast("Listing withdrawn successfully", "success");
+    } catch (e: any) {
+      console.error("Withdrawal error:", e);
+      if (e.message && e.message.includes("CONTRACT_NOT_ACTIVE")) {
+        toast.showToast("Listing already withdrawn or expired", "info");
+      } else if (e.message && e.message.includes("template")) {
+        toast.showToast("Template not available - listing may have changed state", "error");
+      } else {
+        toast.showToast("Failed to withdraw listing: " + (e.message || "Unknown error"), "error");
+      }
+    }
   };
 
   return (
@@ -189,7 +267,7 @@ export default function MarketPresence() {
                   ) : l.type === "DIRECT" ? (
                     <button className="btn-primary" onClick={() => handleDirectSubscription(l)}>Accept</button>
                   ) : (
-                    <button className="btn-outline" style={{color:'var(--danger)'}} onClick={() => ledger.archive(listing.contractId)}>Withdraw</button>
+                    <button className="btn-outline" style={{color:'var(--danger)'}} onClick={() => handleWithdrawListing(l)}>Withdraw</button>
                   )}
                 </td>
               </tr>

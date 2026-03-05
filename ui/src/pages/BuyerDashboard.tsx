@@ -28,6 +28,7 @@ import BuyerYields from "../components/buyer/BuyerYields";
 // Lending components for buyer
 import LendingMarketTab from "../components/lending/LendingMarketTab";
 import LendingPositionsTab from "../components/lending/LendingPositionsTab";
+import LendingModals from "../components/lending/LendingModals";
 
 export default function BuyerDashboard() {
   const ledger = useLedger();
@@ -92,6 +93,16 @@ export default function BuyerDashboard() {
   const realApproved = Trade.ApprovedTrade ? approved : [];
 
   const [selectedAsset, setSelectedAsset] = useState<RWAInstrument | null>(null);
+  
+  // --- LENDING STATE ---
+  const [showLendingModal, setShowLendingModal] = useState<"DEPOSIT" | "BORROW" | "REPAY" | "WITHDRAW" | "EXTEND_LOAN" | null>(null);
+  const [selectedPool, setSelectedPool] = useState<any>(null);
+  const [selectedShare, setSelectedShare] = useState<any>(null);
+  const [selectedLoan, setSelectedLoan] = useState<any>(null);
+  const [lendingAmount, setLendingAmount] = useState<string>("");
+  const [collateralCid, setCollateralCid] = useState<string>("");
+  const [collateralAmount, setCollateralAmount] = useState<string>("");
+  const [extensionDays, setExtensionDays] = useState<string>("");
   
   // --- SYNC STATE ---
   const [showSyncModal, setShowSyncModal] = useState(false);
@@ -160,6 +171,202 @@ export default function BuyerDashboard() {
       toast.showToast("Withdrawal Cancelled", "info"); 
     }
     catch(e:any) { toast.showToast(e.message, "error"); }
+  };
+
+  // --- LENDING HANDLERS ---
+  const handleDeposit = async (pool: any) => {
+    setSelectedPool(pool);
+    setLendingAmount("");
+    setShowLendingModal("DEPOSIT");
+  };
+
+  const handleBorrow = async (pool: any) => {
+    setSelectedPool(pool);
+    setLendingAmount("");
+    setCollateralCid("");
+    setCollateralAmount("");
+    setShowLendingModal("BORROW");
+  };
+
+  const handleWithdraw = async (share: any) => {
+    setSelectedShare(share);
+    setLendingAmount("");
+    setShowLendingModal("WITHDRAW");
+  };
+
+  const handleRepay = async (loan: any) => {
+    setSelectedLoan(loan);
+    setShowLendingModal("REPAY");
+  };
+
+  const handleExtend = async (loan: any) => {
+    setSelectedLoan(loan);
+    setExtensionDays("");
+    setShowLendingModal("EXTEND_LOAN");
+  };
+
+  const submitDeposit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedPool || isSubmitting) return;
+    
+    const amountNum = Number(lendingAmount);
+    if (amountNum <= 0) {
+      toast.showToast("Amount must be greater than 0", "error");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await ledger.create(DepositRequest, {
+        lender: party,
+        poolOperator: selectedPool.payload.poolOperator,
+        assetId: selectedPool.payload.assetId,
+        amount: amountNum.toFixed(2)
+      });
+      toast.showToast("Deposit request submitted", "success");
+      setShowLendingModal(null);
+      setLendingAmount("");
+    } catch (err: any) {
+      toast.showToast("Deposit failed: " + err.message, "error");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const submitBorrow = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedPool || isSubmitting) return;
+    
+    const amountNum = Number(lendingAmount);
+    const collateralNum = Number(collateralAmount);
+    
+    if (amountNum <= 0 || collateralNum <= 0) {
+      toast.showToast("Amounts must be greater than 0", "error");
+      return;
+    }
+
+    if (!collateralCid) {
+      toast.showToast("Please select collateral", "error");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const collateralAllocation = allocations.find(a => a.contractId === collateralCid);
+      if (!collateralAllocation) {
+        throw new Error("Collateral allocation not found");
+      }
+
+      await ledger.create(LoanRequest, {
+        borrower: party,
+        poolOperator: selectedPool.payload.poolOperator,
+        assetId: selectedPool.payload.assetId,
+        requestedAmount: amountNum.toFixed(2),
+        collateralAssetId: collateralAllocation.payload.assetId,
+        collateralAmount: collateralNum.toFixed(2),
+        collateralCid: collateralAllocation.contractId as any,
+        durationDays: 30, // Default 30 days
+        createdAt: new Date().toISOString(),
+        complianceParty: selectedPool.payload.complianceParty,
+        regulatorParty: selectedPool.payload.regulatorParty,
+        miningRoundCid: miningRounds.length > 0 ? { tag: "Some", value: miningRounds[0].contractId } : { tag: "None" }
+      });
+      toast.showToast("Loan request submitted", "success");
+      setShowLendingModal(null);
+      setLendingAmount("");
+      setCollateralCid("");
+      setCollateralAmount("");
+    } catch (err: any) {
+      toast.showToast("Borrow request failed: " + err.message, "error");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const submitWithdrawal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedShare || isSubmitting) return;
+    
+    const sharesNum = Number(lendingAmount);
+    if (sharesNum <= 0) {
+      toast.showToast("Shares must be greater than 0", "error");
+      return;
+    }
+
+    if (sharesNum > Number(selectedShare.payload.shareAmount)) {
+      toast.showToast("Insufficient shares", "error");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await ledger.exercise(LenderShare.RequestWithdrawal, selectedShare.contractId, {
+        sharesToWithdraw: sharesNum
+      });
+      toast.showToast("Withdrawal request submitted", "success");
+      setShowLendingModal(null);
+      setLendingAmount("");
+    } catch (err: any) {
+      toast.showToast("Withdrawal failed: " + err.message, "error");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const submitRepayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedLoan || isSubmitting) return;
+
+    setIsSubmitting(true);
+    try {
+      // Find a holding with the same asset for repayment
+      const repaymentHolding = allocations.find(a => a.payload.assetId === selectedLoan.payload.assetId);
+      if (!repaymentHolding) {
+        throw new Error("No holding found for repayment");
+      }
+
+      const pool = pools.find(p => p.payload.assetId === selectedLoan.payload.assetId);
+      if (!pool) {
+        throw new Error("Pool not found");
+      }
+
+      await ledger.exercise(Loan.RepayLoan, selectedLoan.contractId, {
+        repaymentHoldingCid: repaymentHolding.contractId as any,
+        poolCid: pool.contractId,
+        existingCollateralCid: { tag: "None" }
+      });
+      toast.showToast("Loan repaid successfully", "success");
+      setShowLendingModal(null);
+    } catch (err: any) {
+      toast.showToast("Repayment failed: " + err.message, "error");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const submitExtension = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedLoan || isSubmitting) return;
+    
+    const daysNum = Number(extensionDays);
+    if (daysNum <= 0) {
+      toast.showToast("Days must be greater than 0", "error");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await ledger.exercise(Loan.ExtendLoan, selectedLoan.contractId, {
+        additionalDays: daysNum
+      });
+      toast.showToast(`Loan extended by ${daysNum} days`, "success");
+      setShowLendingModal(null);
+      setExtensionDays("");
+    } catch (err: any) {
+      toast.showToast("Extension failed: " + err.message, "error");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   // --- SYNC HELPER FUNCTIONS ---
@@ -366,8 +573,8 @@ export default function BuyerDashboard() {
             pools={pools} 
             isIssuer={false} 
             isParticipant={true} 
-            onDeposit={(pool) => { /* Handle deposit */ }}
-            onBorrow={(pool) => { /* Handle borrow */ }}
+            onDeposit={handleDeposit}
+            onBorrow={handleBorrow}
           />
           <LendingPositionsTab 
             myShares={myShares} 
@@ -376,11 +583,11 @@ export default function BuyerDashboard() {
             myWithdrawalRequests={myWithdrawalRequests} 
             myRequests={myLoanRequests} 
             pools={pools}
-            onWithdraw={(share) => { /* Handle withdrawal */ }}
+            onWithdraw={handleWithdraw}
             onCancelDeposit={handleCancelDeposit}
             onCancelWithdrawal={handleCancelWithdrawal}
-            onRepay={(loan) => { /* Handle repayment */ }}
-            onExtend={(loan) => { /* Handle extension */ }}
+            onRepay={handleRepay}
+            onExtend={handleExtend}
           />
         </div>
       )}
@@ -441,6 +648,37 @@ export default function BuyerDashboard() {
           <button type="submit" className="btn-primary" style={{ width: '100%' }} disabled={isSubmitting}>{isSubmitting ? "Submitting..." : "Submit Redemption Request"}</button>
         </form>
       </Modal>
+
+      {/* LENDING MODALS */}
+      <LendingModals
+        type={showLendingModal}
+        onClose={() => !isSubmitting && setShowLendingModal(null)}
+        isSubmitting={isSubmitting}
+        onDeposit={submitDeposit}
+        onWithdraw={submitWithdrawal}
+        onBorrow={submitBorrow}
+        onRepay={submitRepayment}
+        onExtend={submitExtension}
+        onCreatePool={() => {}}
+        onUpdateRate={() => {}}
+        assets={assets}
+        allocations={allocations}
+        selectedPool={selectedPool}
+        selectedShare={selectedShare}
+        selectedLoan={selectedLoan}
+        amount={lendingAmount}
+        setAmount={setLendingAmount}
+        newRate=""
+        setNewRate={() => {}}
+        extensionDays={extensionDays}
+        setExtensionDays={setExtensionDays}
+        collateralCid={collateralCid}
+        setCollateralCid={setCollateralCid}
+        collateralAmount={collateralAmount}
+        setCollateralAmount={setCollateralAmount}
+        newPool={{ assetId: "", rate: "", ratio: "" }}
+        setNewPool={() => {}}
+      />
 
       {/* SYNC ISSUES MODAL */}
       <Modal isOpen={showSyncModal} onClose={() => setShowSyncModal(false)} title="Synchronization Required">

@@ -1,7 +1,8 @@
 import React, { useState, useMemo } from "react";
 import { useLedger, useStreamQueries } from "@daml/react";
 import { KYC } from "@daml.js/CantonSuite-0.1.0/lib/KYC";
-import { TradeAgreement } from "@daml.js/CantonSuite-0.1.0/lib/Trade";
+import { TradeAgreement, ComplianceReviewRequest } from "@daml.js/CantonSuite-0.1.0/lib/Trade";
+import { ComplianceApprovalVoucher } from "@daml.js/CantonSuite-0.1.0/lib/Compliance/Vouchers";
 import { DraftRWAInstrument } from "@daml.js/CantonSuite-0.1.0/lib/Finance/Instruments";
 import { DividendClaim, DividendAnnouncementWorkflow } from "@daml.js/CantonSuite-0.1.0/lib/Distribution/ClaimBased"; 
 import { LoanRequest, Loan } from "@daml.js/CantonSuite-0.1.0/lib/Lending/Loans";
@@ -27,6 +28,8 @@ export default function ComplianceDashboard() {
   // --- QUERIES ---
   const { contracts: kycRequests, loading: kycLoading } = useStreamQueries(KYC);
   const { contracts: tradeAgreements, loading: tradesLoading } = useStreamQueries(TradeAgreement);
+  const { contracts: complianceReviewRequests, loading: reviewsLoading } = useStreamQueries(ComplianceReviewRequest);
+  const { contracts: complianceVouchers } = useStreamQueries(ComplianceApprovalVoucher);
   const { contracts: draftAssets, loading: assetsLoading } = useStreamQueries(DraftRWAInstrument);
   const { contracts: dividends, loading: divLoading } = useStreamQueries(DividendClaim);
   const { contracts: sanctionsRegistries } = useStreamQueries(SanctionsRegistry);
@@ -37,7 +40,8 @@ export default function ComplianceDashboard() {
 
   // --- NOTIFICATIONS ---
   useStreamNotification(kycRequests, "KYC Application", kycLoading);
-  useStreamNotification(tradeAgreements, "Trade Audit Request", tradesLoading);
+  useStreamNotification(tradeAgreements, "Trade Agreement", tradesLoading);
+  useStreamNotification(complianceReviewRequests, "Trade Review Request", reviewsLoading);
   useStreamNotification(draftAssets, "Asset Approval Request", assetsLoading);
 
   // --- FILTERED LISTS ---
@@ -48,12 +52,39 @@ export default function ComplianceDashboard() {
     );
   }, [kycRequests, kycSearch]);
 
-  const filteredTrades = useMemo(() => {
-    return tradeAgreements.filter(t => 
-      t.payload.assetId.toLowerCase().includes(tradeSearch.toLowerCase()) || 
-      t.payload.buyer.toLowerCase().includes(tradeSearch.toLowerCase())
+  // Combine both TradeAgreements and ComplianceReviewRequests for display
+  const allTradeItems = useMemo(() => {
+    const agreements = tradeAgreements.map(t => ({
+      type: 'agreement' as const,
+      contractId: t.contractId,
+      assetId: t.payload.assetId,
+      buyer: t.payload.buyer,
+      seller: t.payload.seller,
+      quantity: Number(t.payload.quantity),
+      pricePerUnit: Number(t.payload.pricePerUnit),
+      totalValue: Number(t.payload.quantity) * Number(t.payload.pricePerUnit),
+      status: 'Pending Review Request',
+      payload: t.payload
+    }));
+
+    const reviews = complianceReviewRequests.map(r => ({
+      type: 'review' as const,
+      contractId: r.contractId,
+      assetId: r.payload.assetId,
+      buyer: r.payload.buyer,
+      seller: r.payload.seller,
+      quantity: Number(r.payload.quantity),
+      totalValue: Number(r.payload.totalValue),
+      pricePerUnit: Number(r.payload.totalValue) / Number(r.payload.quantity),
+      status: 'Pending Approval',
+      payload: r.payload
+    }));
+
+    return [...agreements, ...reviews].filter(item =>
+      item.assetId.toLowerCase().includes(tradeSearch.toLowerCase()) ||
+      item.buyer.toLowerCase().includes(tradeSearch.toLowerCase())
     );
-  }, [tradeAgreements, tradeSearch]);
+  }, [tradeAgreements, complianceReviewRequests, tradeSearch]);
 
   const totalPayout = dividends.reduce((acc, d) => acc + Number(d.payload.cashAmount), 0);
 
@@ -72,6 +103,55 @@ export default function ComplianceDashboard() {
       } finally {
           setProcessingIds(prev => { const next = new Set(prev); next.delete(cid); return next; });
       }
+  };
+
+  // --- STEP 1: Request Compliance Review from TradeAgreement ---
+  const handleRequestReview = async (agreementCid: string, buyer: string, seller: string) => {
+    try {
+      await execute(agreementCid, async () => {
+        // This creates a ComplianceReviewRequest from the TradeAgreement
+        await ledger.exercise(TradeAgreement.RequestComplianceApproval, agreementCid, {});
+      }, "Compliance review requested");
+    } catch (e: any) {
+      toast.showToast(e.message, "error");
+    }
+  };
+
+  // --- STEP 2: Approve Trade Review (IssueApprovalVoucher) ---
+  const handleApproveTradeReview = async (reviewCid: string, buyer: string, seller: string, totalValue: number, quantity: number) => {
+    try {
+      // Find available vouchers for buyer and seller
+      const buyerVoucher = complianceVouchers.find(v => 
+        v.payload.approvedParty === buyer && 
+        Number(v.payload.maxAmount) >= totalValue
+      );
+      
+      const sellerVoucher = complianceVouchers.find(v => 
+        v.payload.approvedParty === seller && 
+        Number(v.payload.maxAmount) >= quantity
+      );
+
+      if (!buyerVoucher) {
+        toast.showToast(`No compliance voucher found for buyer ${buyer.split("::")[0]} with sufficient amount ($${totalValue.toLocaleString()})`, "error");
+        return;
+      }
+
+      if (!sellerVoucher) {
+        toast.showToast(`No compliance voucher found for seller ${seller.split("::")[0]} with sufficient quantity (${quantity})`, "error");
+        return;
+      }
+
+      await execute(reviewCid, () => 
+        ledger.exercise(ComplianceReviewRequest.IssueApprovalVoucher, reviewCid, {
+          buyerVoucherCid: buyerVoucher.contractId,
+          sellerVoucherCid: sellerVoucher.contractId,
+          complianceNotes: "Approved by compliance officer"
+        }), 
+        "Trade Approved - ApprovedTrade contract created"
+      );
+    } catch (e: any) {
+      toast.showToast(e.message, "error");
+    }
   };
 
   // --- SANCTIONS MANAGEMENT FUNCTIONS ---
@@ -180,7 +260,7 @@ export default function ComplianceDashboard() {
           KYC & Assets {(pendingKYC.length + draftAssets.length) > 0 && <span className="badge badge-yellow">{pendingKYC.length + draftAssets.length}</span>}
         </button>
         <button onClick={() => setActiveTab("trades")} style={tabStyle(activeTab === "trades")}>
-          Trade Monitor {filteredTrades.length > 0 && <span className="badge badge-yellow">{filteredTrades.length}</span>}
+          Trade Monitor {allTradeItems.length > 0 && <span className="badge badge-yellow">{allTradeItems.length}</span>}
         </button>
         <button onClick={() => setActiveTab("lending")} style={tabStyle(activeTab === "lending")}>
           Lending Risk {loanRequests.length > 0 && <span className="badge badge-yellow">{loanRequests.length}</span>}
@@ -208,7 +288,6 @@ export default function ComplianceDashboard() {
                         className="btn-primary" 
                         disabled={processingIds.has(d.contractId)} 
                         onClick={() => execute(d.contractId, () => {
-                            // FIX 3: Fetch Public Party and add as observer during finalization
                             const publicParty = iam.getPartyByRole("Public");
                             const observers = publicParty ? [publicParty] : [];
                             
@@ -270,27 +349,69 @@ export default function ComplianceDashboard() {
         </div>
       )}
 
-      {/* TAB CONTENT: TRADES */}
+      {/* TAB CONTENT: TRADES - UNIFIED VIEW */}
       {activeTab === 'trades' && (
         <div className="card">
            <div className="flex-between" style={{marginBottom: '1rem'}}>
-             <h3 style={{margin: 0}}>Trade Agreement Monitor</h3>
+             <h3 style={{margin: 0}}>Trade Workflow Monitor</h3>
              <input className="input-field" style={{padding: '0.5rem', width: '250px'}} placeholder="Filter by Asset ID or Buyer..." value={tradeSearch} onChange={e => setTradeSearch(e.target.value)} />
            </div>
            <table>
-            <thead><tr><th>Asset</th><th>Buyer (Real ID)</th><th>Seller</th><th>Value</th><th>Action</th></tr></thead>
+            <thead><tr><th>Asset</th><th>Buyer</th><th>Seller</th><th>Qty</th><th>Value</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
-              {filteredTrades.length === 0 && <tr><td colSpan={5} className="text-muted">No matching trade agreements</td></tr>}
-              {filteredTrades.map(t => (
-                <tr key={t.contractId}>
-                  <td>{t.payload.assetId}</td>
-                  <td style={{fontWeight: 'bold', color: 'var(--primary)'}}>{t.payload.buyer.split("::")[0]}</td>
-                  <td>{t.payload.seller.split("::")[0]}</td>
-                  <td>${(Number(t.payload.quantity) * Number(t.payload.pricePerUnit)).toLocaleString()}</td>
+              {allTradeItems.length === 0 && <tr><td colSpan={7} className="text-muted">No pending trades</td></tr>}
+              {allTradeItems.map(item => (
+                <tr key={item.contractId}>
+                  <td>{item.assetId}</td>
+                  <td style={{fontWeight: 'bold', color: 'var(--primary)'}}>{item.buyer.split("::")[0]}</td>
+                  <td>{item.seller.split("::")[0]}</td>
+                  <td>{item.quantity}</td>
+                  <td>${item.totalValue.toLocaleString()}</td>
                   <td>
-                    <button className="btn-outline" disabled={processingIds.has(t.contractId)} onClick={() => execute(t.contractId, () => ledger.exercise(TradeAgreement.ApproveByCompliance, t.contractId, {}), "Trade Audited & Approved")}>
-                        {processingIds.has(t.contractId) ? "Processing..." : "Log & Approve"}
-                    </button>
+                    <span className={`badge ${item.type === 'agreement' ? 'badge-blue' : 'badge-yellow'}`}>
+                      {item.status}
+                    </span>
+                  </td>
+                  <td>
+                    {item.type === 'agreement' ? (
+                      // TradeAgreement - needs RequestComplianceApproval
+                      <button 
+                        className="btn-outline" 
+                        disabled={processingIds.has(item.contractId)} 
+                        onClick={() => handleRequestReview(item.contractId, item.buyer, item.seller)}
+                      >
+                        {processingIds.has(item.contractId) ? "..." : "Request Review"}
+                      </button>
+                    ) : (
+                      // ComplianceReviewRequest - ready for approval
+                      <div className="flex-gap">
+                        <button 
+                          className="btn-primary" 
+                          disabled={processingIds.has(item.contractId)} 
+                          onClick={() => handleApproveTradeReview(
+                            item.contractId, 
+                            item.buyer, 
+                            item.seller, 
+                            item.totalValue,
+                            item.quantity
+                          )}
+                        >
+                          {processingIds.has(item.contractId) ? "..." : "Approve"}
+                        </button>
+                        <button 
+                          className="btn-danger" 
+                          disabled={processingIds.has(item.contractId)}
+                          onClick={() => execute(item.contractId, () => 
+                            ledger.exercise(ComplianceReviewRequest.RejectTrade, item.contractId, {
+                              rejectionReason: "Failed compliance review"
+                            }), 
+                            "Trade Rejected"
+                          )}
+                        >
+                          {processingIds.has(item.contractId) ? "..." : "Reject"}
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -361,10 +482,9 @@ export default function ComplianceDashboard() {
                         className="btn-primary" 
                         style={{fontSize: '0.7rem', padding: '0.25rem 0.5rem'}}
                         onClick={() => {
-                          // For demo, use mock data - in production, get from backend
                           const totalUnits = 1000;
                           const announcementId = `DIV_${Date.now()}`;
-                          const holders = ["Alice", "Bob", "Charlie"]; // Mock holders
+                          const holders = ["Alice", "Bob", "Charlie"];
                           handleCreateAnnouncement(workflow.contractId, totalUnits, announcementId, holders);
                         }}
                       >
@@ -399,10 +519,9 @@ export default function ComplianceDashboard() {
         </div>
       )}
 
-      {/* TAB CONTENT: SANCTIONS */}
+      {/* TAB CONTENT: SANCTIONS (unchanged) */}
       {activeTab === 'sanctions' && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2rem" }}>
-          {/* SANCTIONS REGISTRY */}
           <div className="card">
             <div className="flex-between" style={{marginBottom: '1rem'}}>
               <h3>🛡️ Sanctions Registry</h3>
@@ -446,7 +565,6 @@ export default function ComplianceDashboard() {
             )}
           </div>
 
-          {/* SANCTIONS CLEARANCES */}
           <div className="card">
             <div className="flex-between" style={{marginBottom: '1rem'}}>
               <h3>📋 Active Clearances</h3>
@@ -494,7 +612,7 @@ export default function ComplianceDashboard() {
         </div>
       )}
 
-      {/* ADD SANCTION MODAL */}
+      {/* MODALS (unchanged) */}
       {showSanctionsModal && (
         <div className="modal-overlay" onClick={() => setShowSanctionsModal(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()} style={{maxWidth: '500px'}}>
@@ -538,7 +656,6 @@ export default function ComplianceDashboard() {
         </div>
       )}
 
-      {/* ISSUE CLEARANCE MODAL */}
       {showClearanceModal && (
         <div className="modal-overlay" onClick={() => setShowClearanceModal(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()} style={{maxWidth: '500px'}}>
